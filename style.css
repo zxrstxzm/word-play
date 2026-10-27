@@ -2381,6 +2381,30 @@ body:has(#tutu_name_mask_editor[data-placement="sheet"]) #tutu_export_dialog[dat
     height: 44px;
 }
 
+/* 手机：屏蔽设置不再底部弹出，改为贴在按钮下方的小浮层 */
+@media (max-width: 600px), (pointer: coarse) and (max-height: 500px) {
+    #tutu_name_mask_editor {
+        width: min(320px, calc(100vw - 16px));
+        max-height: min(60vh, calc(100vh - 16px));
+    }
+
+    #tutu_name_mask_editor > .tutu-dialogue-editor {
+        gap: 6px;
+        padding: 0 10px 10px;
+        border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.2));
+        border-radius: 10px;
+        font-size: 0.92em;
+    }
+
+    #tutu_name_mask_editor .tutu-dialogue-editor-head {
+        padding: 8px 0 2px;
+    }
+
+    #tutu_name_mask_editor .tutu-dialogue-editor-hint {
+        display: none;
+    }
+}
+
 @media (max-width: 600px) {
     .tutu-name-mask-row-actions {
         margin-left: 0;

@@ -9116,7 +9116,8 @@ function getTutuNameMaskAnchor() {
 }
 
 function positionTutuNameMaskEditor() {
-    positionTutuPopover(document.getElementById('tutu_name_mask_editor'), getTutuNameMaskAnchor());
+    // 屏蔽设置在手机上也贴着按钮显示成小浮层，不用底部弹出
+    positionTutuPopover(document.getElementById('tutu_name_mask_editor'), getTutuNameMaskAnchor(), { sheet: false });
 }
 
 /** 手机等窄屏：浮动面板改为底部弹出 */
@@ -9125,7 +9126,7 @@ function isTutuSheetLayout() {
 }
 
 /** 把浮动面板放在按钮下方；下方放不下就放上方，左右不超出屏幕 */
-function positionTutuPopover(modal, anchor) {
+function positionTutuPopover(modal, anchor, { sheet = true } = {}) {
     if (!modal) return;
 
     const gap = 6;
@@ -9136,7 +9137,7 @@ function positionTutuPopover(modal, anchor) {
     modal.style.maxHeight = '';
 
     // 手机：改成从底部弹出的面板，手指好点，键盘弹出时跟着可视区域上移
-    if (isTutuSheetLayout()) {
+    if (sheet && isTutuSheetLayout()) {
         const view = window.visualViewport;
         const viewHeight = view ? view.height : vh;
         const viewBottom = view ? view.offsetTop + view.height : vh;

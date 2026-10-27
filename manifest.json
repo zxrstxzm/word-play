@@ -1,7 +1,7 @@
 {
     "display_name": "克制放映室",
     "author": "克制游乐园",
-    "version": "1.4.06",
+    "version": "1.4.07",
     "description": "克制游乐园出品：在输入菜单中注入一个可以生成外置小剧场的独立面板。",
     "js": "index.js",
     "css": "style.css",
