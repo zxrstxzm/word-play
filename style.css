@@ -5436,3 +5436,65 @@ details.tutu-captured-element > .tutu-capture-actions-bar {
         width: 72px;
     }
 }
+
+/* =========================================================
+   排版美化
+   ========================================================= */
+.tutu-typography-manager {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid var(--SmartThemeBorderColor);
+}
+
+.tutu-typo-grid {
+    display: grid;
+    grid-template-columns: 110px minmax(0, 1fr);
+    align-items: center;
+    gap: 8px 10px;
+}
+
+.tutu-typo-grid .tutu-settings-label {
+    margin: 0;
+}
+
+.tutu-typo-grid .text_pole {
+    margin: 0;
+    min-width: 0;
+}
+
+.tutu-typo-color-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+}
+
+.tutu-typo-color-row input[type="color"] {
+    flex: 0 0 36px;
+    width: 36px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    background: transparent;
+    cursor: pointer;
+}
+
+.tutu-typo-color-row .text_pole {
+    flex: 1 1 auto;
+}
+
+@media (max-width: 600px) {
+    .tutu-typo-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+/* 防截断：嵌入 / 收藏的 iframe 由内容高度决定，不再被固定高度裁掉 */
+.tutu-theater-embed-body,
+.tutu-favorite-html-container {
+    max-height: none;
+}

@@ -1445,6 +1445,42 @@ if (typeof tutuSettings.auxPromptsEnabled !== 'boolean') {
     );
 }
 
+// 读取历史聊天记录的全局默认：旧版本只有按角色保存，迁移时沿用任一角色已开启的设置
+if (typeof tutuSettings.historyIncludeEnabled !== 'boolean') {
+    const oldContexts = Object.values(
+        loadLocalJson(CHARACTER_CONTEXT_KEY, {}) || {}
+    );
+    const enabledContext = oldContexts.find(item => item?.includeHistory);
+
+    tutuSettings.historyIncludeEnabled = Boolean(enabledContext);
+    tutuSettings.historyLimitDefault =
+        Number(enabledContext?.historyLimit) || 20;
+}
+
+if (!(Number(tutuSettings.historyLimitDefault) > 0)) {
+    tutuSettings.historyLimitDefault = 20;
+}
+
+if (typeof tutuSettings.renderAntiClip !== 'boolean') {
+    tutuSettings.renderAntiClip = true;
+}
+
+tutuSettings.typography = {
+    ...getDefaultTutuTypography(),
+    ...(tutuSettings.typography || {}),
+};
+
+/**
+ * 立即把当前设置写入本地，所有改动都走这里，不再依赖「保存设置」按钮。
+ */
+function persistTutuSettings() {
+    try {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(tutuSettings));
+    } catch (error) {
+        console.warn('[兔兔小剧场] 保存设置失败：', error);
+    }
+}
+
 
 let tutuApiPresets = loadLocalJson(API_PRESETS_KEY, []);
 
@@ -1911,17 +1947,37 @@ function buildTutuRenderedContent(content, scenarioId) {
         return { html: raw, isHtml: false };
     }
 
-    const autoFit = isTutuAutoFitActive();
-
     const styleTag = cssText
         ? `<style id="tutu-render-css">\n${cssText.replace(/<\/style/gi, '<\\/style')}\n</style>`
         : '';
 
-    let html = buildTutuRenderedDocument(replaced, styleTag, isHtml, regexChanged);
+    const isFullDocument =
+        /<\/head>/i.test(replaced) ||
+        /<html[\s>]/i.test(replaced) ||
+        /^<!doctype/i.test(replaced.trim());
 
-    if (autoFit) {
-        html = injectTutuAutoHeightScript(html);
-    }
+    /*
+     * 排版美化：
+     * - 纯文本 / 片段（兔兔自己包的文档）完整应用
+     * - 完整 HTML 文档仅在勾选「同时应用到 HTML」时应用字体字号颜色
+     * 排版写在用户 CSS 之前，用户 CSS 可以覆盖。
+     */
+    const typoCss = isFullDocument
+        ? (getTutuTypographyState().applyHtml ? buildTutuTypographyIframeCss(false) : '')
+        : buildTutuTypographyIframeCss(true);
+
+    const typoTag = typoCss
+        ? `<style id="tutu-typography-css">\n${typoCss}\n</style>`
+        : '';
+
+    let html = buildTutuRenderedDocument(
+        replaced,
+        `${typoTag}\n${styleTag}`,
+        isHtml,
+        regexChanged
+    );
+
+    html = injectTutuAntiClip(html);
 
     return { html, isHtml: true };
 }
@@ -1960,6 +2016,253 @@ ${styleTag}
     }
 
     return html;
+}
+
+// ==========================================
+// 内置防截断
+// ==========================================
+
+/**
+ * 防截断 CSS：放在文档最末尾，优先级最高。
+ * 只解除 html / body 的固定高度和隐藏溢出，不动内部元素的布局。
+ */
+const TUTU_ANTI_CLIP_CSS = `html, body {
+    height: auto !important;
+    max-height: none !important;
+    overflow-y: visible !important;
+}
+html { overflow-x: hidden !important; }
+body { overflow-x: auto !important; }`;
+
+function isTutuAntiClipActive() {
+    return tutuSettings.renderAntiClip !== false;
+}
+
+/**
+ * 需要自动高度时（防截断或一键自适应）注入高度上报脚本，
+ * 防截断开启时再追加防截断 CSS。
+ */
+function injectTutuAntiClip(html) {
+    const antiClip = isTutuAntiClipActive();
+
+    if (!antiClip && !isTutuAutoFitActive()) {
+        return html;
+    }
+
+    let result = injectTutuAutoHeightScript(html);
+
+    if (antiClip) {
+        const style = `<style id="tutu-anti-clip">\n${TUTU_ANTI_CLIP_CSS}\n</style>`;
+
+        result = /<\/body>/i.test(result)
+            ? result.replace(/<\/body>(?![\s\S]*<\/body>)/i, `${style}\n</body>`)
+            : `${result}\n${style}`;
+    }
+
+    return result;
+}
+
+// ==========================================
+// 内置排版美化：字号 / 行距 / 字体 / 颜色 / 背景
+// ==========================================
+
+const TUTU_FONT_PRESETS = {
+    inherit: '',
+    serif: '"Noto Serif SC", "Source Han Serif SC", "Songti SC", "SimSun", serif',
+    sans: '"Noto Sans SC", "Source Han Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif',
+    kai: '"LXGW WenKai", "KaiTi", "STKaiti", "Kaiti SC", serif',
+    fangsong: '"FangSong", "STFangsong", "FangSong_GB2312", serif',
+    round: '"Yuanti SC", "YouYuan", "Varela Round", sans-serif',
+    mono: '"JetBrains Mono", "Cascadia Code", "Consolas", "Noto Sans Mono CJK SC", monospace',
+};
+
+function getDefaultTutuTypography() {
+    return {
+        enabled: false,
+        fontSize: 15,
+        lineHeight: 1.8,
+        fontPreset: 'inherit',
+        fontFamily: '',
+        fontUrl: '',
+        textColor: '',
+        bgColor: '',
+        bgImage: '',
+        padding: 14,
+        applyHtml: false,
+    };
+}
+
+/** 去掉可能跳出 CSS 声明的字符 */
+function sanitizeTutuCssValue(value) {
+    return String(value || '')
+        .replace(/[<>{};\\]/g, '')
+        .replace(/\/\*|\*\//g, '')
+        .trim()
+        .slice(0, 300);
+}
+
+/** 只允许 http(s) / data / 相对路径，并转义引号括号 */
+function sanitizeTutuCssUrl(value) {
+    const url = String(value || '').trim();
+
+    if (!url) return '';
+    if (!/^(https?:\/\/|data:|\/|\.\/)/i.test(url)) return '';
+
+    return url
+        .replace(/[\s<>{}\\]/g, '')
+        .replace(/["'()]/g, char => encodeURIComponent(char))
+        .slice(0, 2000);
+}
+
+/** 用户写的字体名：单个名字自动加引号，多个（逗号分隔）按原样 */
+function normalizeTutuFontFamily(value) {
+    const name = sanitizeTutuCssValue(value);
+
+    if (!name) return '';
+    if (name.includes(',') || /["']/.test(name)) return name;
+
+    return `"${name}"`;
+}
+
+function getTutuTypographyState() {
+    const typo = {
+        ...getDefaultTutuTypography(),
+        ...(tutuSettings.typography || {}),
+    };
+
+    const fontSize = Number(typo.fontSize);
+    const lineHeight = Number(typo.lineHeight);
+    const padding = Number(typo.padding);
+
+    typo.fontSize = Number.isFinite(fontSize)
+        ? Math.min(Math.max(fontSize, 10), 40)
+        : 15;
+    typo.lineHeight = Number.isFinite(lineHeight)
+        ? Math.min(Math.max(lineHeight, 1), 3)
+        : 1.8;
+    typo.padding = Number.isFinite(padding)
+        ? Math.min(Math.max(padding, 0), 60)
+        : 14;
+
+    return typo;
+}
+
+/** 返回 { fontFace, family }，fontFace 是 @import / @font-face 语句 */
+function getTutuTypographyFont(typo) {
+    const fontUrl = sanitizeTutuCssUrl(typo.fontUrl);
+    const customName =
+        normalizeTutuFontFamily(typo.fontFamily) ||
+        (fontUrl ? '"TutuCustomFont"' : '');
+
+    let fontFace = '';
+
+    if (fontUrl) {
+        const isFontFile = /\.(woff2?|ttf|otf)(\?|#|$)/i.test(fontUrl) ||
+            /^data:font\//i.test(fontUrl);
+
+        fontFace = isFontFile
+            ? `@font-face { font-family: ${customName}; src: url("${fontUrl}"); font-display: swap; }`
+            : `@import url("${fontUrl}");`;
+    }
+
+    let family = '';
+
+    if (typo.fontPreset === 'custom') {
+        family = customName;
+    } else if (TUTU_FONT_PRESETS[typo.fontPreset]) {
+        family = TUTU_FONT_PRESETS[typo.fontPreset];
+    }
+
+    // 预设字体 + 自定义字体名同时存在时，自定义字体优先
+    if (customName && typo.fontPreset !== 'custom' && typo.fontPreset !== 'inherit') {
+        family = `${customName}, ${family}`;
+    }
+
+    return { fontFace, family };
+}
+
+/**
+ * 生成排版声明。
+ * withBackground：是否包含背景和内边距（HTML 文档不改背景）。
+ */
+function buildTutuTypographyDeclarations(typo, family, withBackground, important) {
+    const imp = important ? ' !important' : '';
+    const rules = [
+        `font-size: ${typo.fontSize}px${imp}`,
+        `line-height: ${typo.lineHeight}${imp}`,
+    ];
+
+    if (family) rules.push(`font-family: ${family}${imp}`);
+
+    const textColor = sanitizeTutuCssValue(typo.textColor);
+    if (textColor) rules.push(`color: ${textColor}${imp}`);
+
+    if (withBackground) {
+        const bgColor = sanitizeTutuCssValue(typo.bgColor);
+        const bgImage = sanitizeTutuCssUrl(typo.bgImage);
+
+        if (bgColor) rules.push(`background-color: ${bgColor}${imp}`);
+
+        if (bgImage) {
+            rules.push(`background-image: url("${bgImage}")${imp}`);
+            rules.push(`background-size: cover${imp}`);
+            rules.push(`background-position: center${imp}`);
+            rules.push(`background-repeat: no-repeat${imp}`);
+        }
+
+        rules.push(`padding: ${typo.padding}px${imp}`);
+    }
+
+    return rules.join(';\n    ');
+}
+
+/**
+ * iframe 内部的排版 CSS。
+ * plain=true：兔兔自己包装的纯文本 / 片段文档，完整应用含背景；
+ * plain=false：完整 HTML 文档，只改字体字号行距颜色，且不加 !important，内部样式可覆盖。
+ */
+function buildTutuTypographyIframeCss(plain) {
+    const typo = getTutuTypographyState();
+
+    if (!typo.enabled) return '';
+
+    const { fontFace, family } = getTutuTypographyFont(typo);
+    const body = buildTutuTypographyDeclarations(typo, family, plain, false);
+
+    return `${fontFace}\nbody {\n    ${body};\n}`;
+}
+
+/**
+ * 页面上不走 iframe 的纯文本（面板预览、嵌入楼层、全屏）的全局排版样式。
+ */
+function applyTutuTypographyStyle() {
+    const styleId = 'tutu_typography_style';
+    let style = document.getElementById(styleId);
+
+    if (!style) {
+        style = document.createElement('style');
+        style.id = styleId;
+        document.head.appendChild(style);
+    }
+
+    const typo = getTutuTypographyState();
+
+    if (!typo.enabled) {
+        style.textContent = '';
+        return;
+    }
+
+    const { fontFace, family } = getTutuTypographyFont(typo);
+    const declarations = buildTutuTypographyDeclarations(typo, family, true, true);
+
+    style.textContent = `${fontFace}
+.tutu-typo-plain {
+    ${declarations};
+    white-space: pre-wrap !important;
+    word-break: break-word !important;
+    border-radius: 8px;
+    box-sizing: border-box;
+}`;
 }
 
 // ==========================================
@@ -2096,7 +2399,7 @@ function initTutuAutoHeightListener() {
         const data = event.data;
 
         if (!data || data.type !== 'tutu-theater-height') return;
-        if (!isTutuAutoFitActive()) return;
+        if (!isTutuAutoFitActive() && !isTutuAntiClipActive()) return;
 
         const height = Number(data.height);
 
@@ -2113,6 +2416,24 @@ function initTutuAutoHeightListener() {
         );
 
         if (!inTheater) return;
+
+        /*
+         * 防止 100vh 之类的布局形成「iframe 变高 → 内容变高」的死循环：
+         * 2 秒内连续增高超过 12 次就停止调整，保持当前高度。
+         */
+        const now = Date.now();
+        const state = iframe._tutuHeightState || { count: 0, since: now, last: 0 };
+
+        if (now - state.since > 2000) {
+            state.count = 0;
+            state.since = now;
+        }
+
+        if (height > state.last) state.count += 1;
+        state.last = height;
+        iframe._tutuHeightState = state;
+
+        if (state.count > 12) return;
 
         const finalHeight = Math.min(Math.max(height, 40), 20000);
 
@@ -2211,6 +2532,8 @@ function renderTutuRenderManager() {
         'tutu-render-autofit-on',
         isTutuAutoFitActive()
     );
+
+    $('#tutu_render_anti_clip').prop('checked', isTutuAntiClipActive());
 
     renderList(
         '#tutu_render_css_list',
@@ -3459,6 +3782,79 @@ localStorage.setItem(
         </div>
     </div>
 </div>
+        <div class="tutu-typography-manager">
+            <div class="tutu-settings-title">
+                <i class="fa-solid fa-font"></i>
+                排版美化（纯文字小剧场）
+            </div>
+
+            <label class="tutu-history-option">
+                <input type="checkbox" id="tutu_typo_enabled">
+                <span>启用排版美化</span>
+            </label>
+
+            <div class="tutu-typo-grid">
+                <label class="tutu-settings-label" for="tutu_typo_font_size">字号（px）</label>
+                <input id="tutu_typo_font_size" class="text_pole" type="number" min="10" max="40" step="1">
+
+                <label class="tutu-settings-label" for="tutu_typo_line_height">行距</label>
+                <input id="tutu_typo_line_height" class="text_pole" type="number" min="1" max="3" step="0.1">
+
+                <label class="tutu-settings-label" for="tutu_typo_padding">内边距（px）</label>
+                <input id="tutu_typo_padding" class="text_pole" type="number" min="0" max="60" step="1">
+
+                <label class="tutu-settings-label" for="tutu_typo_font_preset">字体</label>
+                <select id="tutu_typo_font_preset" class="text_pole">
+                    <option value="inherit">跟随酒馆</option>
+                    <option value="serif">宋体 / 衬线</option>
+                    <option value="sans">黑体 / 无衬线</option>
+                    <option value="kai">楷体 / 霞鹜文楷</option>
+                    <option value="fangsong">仿宋</option>
+                    <option value="round">圆体</option>
+                    <option value="mono">等宽</option>
+                    <option value="custom">自定义字体</option>
+                </select>
+
+                <label class="tutu-settings-label" for="tutu_typo_font_family">自定义字体名</label>
+                <input id="tutu_typo_font_family" class="text_pole" type="text" placeholder="例如：LXGW WenKai（填写后优先使用）">
+
+                <label class="tutu-settings-label" for="tutu_typo_font_url">字体链接（可选）</label>
+                <input id="tutu_typo_font_url" class="text_pole" type="text" placeholder="字体文件 .woff2/.ttf，或 Google Fonts 等 CSS 链接">
+
+                <label class="tutu-settings-label" for="tutu_typo_text_color">文字颜色</label>
+                <div class="tutu-typo-color-row">
+                    <input id="tutu_typo_text_color_picker" type="color" value="#333333" aria-label="选择文字颜色">
+                    <input id="tutu_typo_text_color" class="text_pole" type="text" placeholder="留空跟随主题，如 #4a3b32">
+                </div>
+
+                <label class="tutu-settings-label" for="tutu_typo_bg_color">背景颜色</label>
+                <div class="tutu-typo-color-row">
+                    <input id="tutu_typo_bg_color_picker" type="color" value="#fffaf2" aria-label="选择背景颜色">
+                    <input id="tutu_typo_bg_color" class="text_pole" type="text" placeholder="留空不改，可填 rgba(255,250,240,.9)">
+                </div>
+
+                <label class="tutu-settings-label" for="tutu_typo_bg_image">背景图片链接</label>
+                <input id="tutu_typo_bg_image" class="text_pole" type="text" placeholder="https://...（铺满居中）">
+            </div>
+
+            <label class="tutu-history-option">
+                <input type="checkbox" id="tutu_typo_apply_html">
+                <span>同时应用到 HTML 小剧场（只改字体 / 字号 / 行距 / 颜色，不改背景，HTML 自带样式优先）</span>
+            </label>
+
+            <div class="tutu-appearance-actions">
+                <button type="button" id="tutu_typo_reset_btn" class="menu_button">
+                    <i class="fa-solid fa-rotate-left"></i>
+                    恢复默认排版
+                </button>
+            </div>
+
+            <div class="tutu-api-help">
+                改动立即生效并自动保存。作用于面板预览、嵌入楼层、全屏查看；
+                源码、导出和发给 AI 的内容不变。
+            </div>
+        </div>
+
         <div class="tutu-render-manager">
             <div class="tutu-settings-title">
                 <i class="fa-solid fa-wand-magic-sparkles"></i>
@@ -3532,6 +3928,11 @@ localStorage.setItem(
                     一键自适应（标签夺舍）
                 </button>
             </div>
+
+            <label class="tutu-history-option">
+                <input type="checkbox" id="tutu_render_anti_clip">
+                <span>内置防截断（高度随内容自动撑开，解除 CSS 的固定高度 / 隐藏溢出）</span>
+            </label>
 
             <div id="tutu_render_css_list" class="tutu-render-list"></div>
 
@@ -4190,10 +4591,14 @@ function getCurrentTutuCharacterStorage() {
     const key = getTutuCharacterStorageKey(character, context);
 
     if (!tutuCharacterContexts[key]) {
+        /*
+         * 新角色沿用上一次的全局默认（读取历史 / 条数），
+         * 不再每次都回到「不读取」。
+         */
         tutuCharacterContexts[key] = {
             selectedWorldEntries: [],
-            includeHistory: false,
-            historyLimit: 20,
+            includeHistory: Boolean(tutuSettings.historyIncludeEnabled),
+            historyLimit: Number(tutuSettings.historyLimitDefault) || 20,
         };
     }
 
@@ -4225,6 +4630,13 @@ function saveCurrentTutuCharacterStorage(settings) {
         CHARACTER_CONTEXT_KEY,
         JSON.stringify(tutuCharacterContexts)
     );
+
+    // 同步为全局默认，新角色 / 下次打开直接沿用
+    tutuSettings.historyIncludeEnabled =
+        tutuCharacterContexts[current.key].includeHistory;
+    tutuSettings.historyLimitDefault =
+        tutuCharacterContexts[current.key].historyLimit;
+    persistTutuSettings();
 }
 
 function escapeHtml(value) {
@@ -5225,7 +5637,7 @@ iframe.srcdoc = rendered.html;
 
         showTutuResultMode('preview');
     } else {
-        const $plain = $('<div class="tutu-plain-preview"></div>');
+        const $plain = $('<div class="tutu-plain-preview tutu-typo-plain"></div>');
         $plain.text(content);
 
         $preview.append($plain);
@@ -5557,6 +5969,7 @@ summary.appendChild(embedActions);
          * 不使用 innerHTML，避免文本被当成 HTML 执行。
          */
         body.textContent = content;
+        body.classList.add('tutu-typo-plain');
     }
 
     details.appendChild(summary);
@@ -6225,7 +6638,7 @@ function openTutuTheaterFullscreen(
     } else {
         const plain = document.createElement('div');
 
-        plain.className = 'tutu-fullscreen-plain';
+        plain.className = 'tutu-fullscreen-plain tutu-typo-plain';
         plain.textContent = text;
 
         body.appendChild(plain);
@@ -6307,8 +6720,8 @@ let tutuCurrentCharacterContext = {
     worldEntries: [],
     storageKey: '',
     selectedWorldEntries: [],
-    includeHistory: false,
-    historyLimit: 20,
+    includeHistory: Boolean(tutuSettings.historyIncludeEnabled),
+    historyLimit: Number(tutuSettings.historyLimitDefault) || 20,
 };
 
 
@@ -8260,14 +8673,17 @@ if (!response.ok) {
 
 function saveTutuSettings() {
     tutuSettings = {
+        // 保留未在此列出的字段（排版、历史默认、防截断等），避免点保存时被清空
+        ...tutuSettings,
+
         provider:
             $('#tutu_api_provider').val() || 'main',
 
         endpoint:
-            $('#tutu_secondary_endpoint').val().trim(),
+            String($('#tutu_secondary_endpoint').val() || '').trim(),
 
         apiKey:
-            $('#tutu_secondary_api_key').val().trim(),
+            String($('#tutu_secondary_api_key').val() || '').trim(),
 
         model:
             String($('#tutu_secondary_model').val() || '').trim(),
@@ -8731,8 +9147,7 @@ function loadTutuSettingsToUI() {
     $('#tutu_secondary_api_key')
         .val(tutuSettings.apiKey || '');
 
-    $('#tutu_secondary_model')
-        .val(tutuSettings.model || '');
+    setTutuSecondaryModelValue(tutuSettings.model || '');
 
     $('#tutu_auto_generate_enabled')
         .prop(
@@ -8789,6 +9204,38 @@ renderTutuAuxPromptManager();
 }
 
 
+
+/**
+ * 模型下拉框在拉取前没有选项，直接 .val() 会变成空。
+ * 已保存的模型不在列表里时，补一个「已保存」选项再选中。
+ */
+function setTutuSecondaryModelValue(model) {
+    const value = String(model || '').trim();
+    const $select = $('#tutu_secondary_model');
+
+    if (!$select.length) return;
+
+    if (!value) {
+        $select.val('');
+        return;
+    }
+
+    const exists = $select
+        .find('option')
+        .toArray()
+        .some(option => option.value === value);
+
+    if (!exists) {
+        $select.append(
+            $('<option>', {
+                value,
+                text: `${value}（已保存）`,
+            })
+        );
+    }
+
+    $select.val(value);
+}
 
 function updateSecondaryApiVisibility() {
     const provider = $('#tutu_api_provider').val();
@@ -12027,6 +12474,110 @@ $(document).on(
     }
 );
 
+// 内置防截断
+$(document).on('change', '#tutu_render_anti_clip', function () {
+    tutuSettings.renderAntiClip = $(this).is(':checked');
+    persistTutuSettings();
+    refreshTutuCurrentRender();
+});
+
+// ==========================================
+// 排版美化
+// ==========================================
+const TUTU_HEX_COLOR = /^#[0-9a-f]{6}$/i;
+
+function loadTutuTypographyToUI() {
+    const typo = getTutuTypographyState();
+
+    $('#tutu_typo_enabled').prop('checked', Boolean(typo.enabled));
+    $('#tutu_typo_font_size').val(typo.fontSize);
+    $('#tutu_typo_line_height').val(typo.lineHeight);
+    $('#tutu_typo_padding').val(typo.padding);
+    $('#tutu_typo_font_preset').val(
+        TUTU_FONT_PRESETS[typo.fontPreset] !== undefined || typo.fontPreset === 'custom'
+            ? typo.fontPreset
+            : 'inherit'
+    );
+    $('#tutu_typo_font_family').val(typo.fontFamily || '');
+    $('#tutu_typo_font_url').val(typo.fontUrl || '');
+    $('#tutu_typo_text_color').val(typo.textColor || '');
+    $('#tutu_typo_bg_color').val(typo.bgColor || '');
+    $('#tutu_typo_bg_image').val(typo.bgImage || '');
+    $('#tutu_typo_apply_html').prop('checked', Boolean(typo.applyHtml));
+
+    if (TUTU_HEX_COLOR.test(typo.textColor || '')) {
+        $('#tutu_typo_text_color_picker').val(typo.textColor);
+    }
+
+    if (TUTU_HEX_COLOR.test(typo.bgColor || '')) {
+        $('#tutu_typo_bg_color_picker').val(typo.bgColor);
+    }
+}
+
+function readTutuTypographyNumber(selector, fallback) {
+    const raw = String($(selector).val() ?? '').trim();
+    const value = Number(raw);
+
+    // 输入框清空或输入中途时保留原值
+    return raw && Number.isFinite(value) ? value : fallback;
+}
+
+let tutuTypographyRefreshTimer = null;
+
+function saveTutuTypographyFromUI() {
+    const old = getTutuTypographyState();
+
+    tutuSettings.typography = {
+        ...old,
+        enabled: $('#tutu_typo_enabled').is(':checked'),
+        fontSize: readTutuTypographyNumber('#tutu_typo_font_size', old.fontSize),
+        lineHeight: readTutuTypographyNumber('#tutu_typo_line_height', old.lineHeight),
+        padding: readTutuTypographyNumber('#tutu_typo_padding', old.padding),
+        fontPreset: $('#tutu_typo_font_preset').val() || 'inherit',
+        fontFamily: String($('#tutu_typo_font_family').val() || '').trim(),
+        fontUrl: String($('#tutu_typo_font_url').val() || '').trim(),
+        textColor: String($('#tutu_typo_text_color').val() || '').trim(),
+        bgColor: String($('#tutu_typo_bg_color').val() || '').trim(),
+        bgImage: String($('#tutu_typo_bg_image').val() || '').trim(),
+        applyHtml: $('#tutu_typo_apply_html').is(':checked'),
+    };
+
+    persistTutuSettings();
+
+    // 页面内纯文本立即生效
+    applyTutuTypographyStyle();
+
+    // iframe 内的内容需要重新渲染，防抖避免输入时频繁刷新
+    clearTimeout(tutuTypographyRefreshTimer);
+    tutuTypographyRefreshTimer = setTimeout(refreshTutuCurrentRender, 400);
+}
+
+$(document).on(
+    'input change',
+    '#tutu_typo_enabled, #tutu_typo_font_size, #tutu_typo_line_height, #tutu_typo_padding, #tutu_typo_font_preset, #tutu_typo_font_family, #tutu_typo_font_url, #tutu_typo_text_color, #tutu_typo_bg_color, #tutu_typo_bg_image, #tutu_typo_apply_html',
+    saveTutuTypographyFromUI
+);
+
+// 取色器与文本框同步
+$(document).on('input change', '#tutu_typo_text_color_picker', function () {
+    $('#tutu_typo_text_color').val($(this).val());
+    saveTutuTypographyFromUI();
+});
+
+$(document).on('input change', '#tutu_typo_bg_color_picker', function () {
+    $('#tutu_typo_bg_color').val($(this).val());
+    saveTutuTypographyFromUI();
+});
+
+$(document).on('click', '#tutu_typo_reset_btn', function () {
+    tutuSettings.typography = getDefaultTutuTypography();
+    persistTutuSettings();
+    loadTutuTypographyToUI();
+    applyTutuTypographyStyle();
+    refreshTutuCurrentRender();
+    toastr.success('排版已恢复默认');
+});
+
 $(document).on('change', '.tutu-render-toggle', function () {
     const $row = $(this).closest('.tutu-render-item');
     const kind = String($row.attr('data-kind'));
@@ -12259,6 +12810,14 @@ $(document).on('click', '#tutu_render_css_add_btn', function () {
 });
 
 loadTutuSettingsToUI();
+loadTutuTypographyToUI();
+applyTutuTypographyStyle();
+
+// 读取历史聊天记录：先显示上次的全局默认，切到具体角色后再按角色刷新
+$('#tutu_include_history').prop('checked', Boolean(tutuSettings.historyIncludeEnabled));
+$('#tutu_history_limit').val(Number(tutuSettings.historyLimitDefault) || 20);
+$('#tutu_history_limit_box').toggle(Boolean(tutuSettings.historyIncludeEnabled));
+
 ensureTutuScenarioIds();
 initTutuAutoHeightListener();
 renderTutuRenderManager();
@@ -12284,6 +12843,29 @@ setTimeout(async () => {
 $(document).on('change', '#tutu_api_provider', function() {
     updateSecondaryApiVisibility();
 });
+
+// API 选择 / 地址 / 密钥 / 模型：改动即自动保存，下次打开无需重新设置
+$(document).on(
+    'input change',
+    '#tutu_api_provider, #tutu_secondary_endpoint, #tutu_secondary_api_key, #tutu_secondary_model',
+    function () {
+        tutuSettings.provider =
+            $('#tutu_api_provider').val() || 'main';
+        tutuSettings.endpoint =
+            String($('#tutu_secondary_endpoint').val() || '').trim();
+        tutuSettings.apiKey =
+            String($('#tutu_secondary_api_key').val() || '').trim();
+
+        const model = String($('#tutu_secondary_model').val() || '').trim();
+
+        // 拉取模型过程中下拉框会暂时为空，此时不覆盖已保存的模型
+        if (model || this.id === 'tutu_secondary_model') {
+            tutuSettings.model = model;
+        }
+
+        persistTutuSettings();
+    }
+);
 $(document).on(
     'click',
     '#tutu_fetch_models_btn',
