@@ -1200,6 +1200,10 @@ const favoriteRendered =
 const isHtmlFavorite =
     favoriteRendered.isHtml;
 
+// 屏蔽名字：开启时卡片标题、正文里的名字都换成马赛克 / 图片
+const maskItems = getTutuActiveMaskItems(content);
+const isMasked = maskItems.length > 0;
+
 const preview =
     isHtmlFavorite
         ? ''
@@ -1268,6 +1272,19 @@ ${isHtmlFavorite ? '' : `
     class="
         menu_button
         margin0
+        tutu-favorite-mask-btn${isMasked ? ' active' : ''}
+    "
+    role="button"
+    tabindex="0"
+    aria-pressed="${isMasked ? 'true' : 'false'}"
+    title="${isMasked ? '取消屏蔽名字' : '一键屏蔽名字（马赛克 / 图片替换）'}">
+    <i class="fa-solid fa-user-secret"></i>
+</div>
+
+<div
+    class="
+        menu_button
+        margin0
         tutu-favorite-export-btn
     "
     title="导出">
@@ -1296,6 +1313,15 @@ ${isHtmlFavorite ? '' : `
 
                             </div>
                         </div>
+
+${isMasked ? `
+<div class="tutu-favorite-mask-bar">
+    <span><i class="fa-solid fa-user-secret"></i> 已屏蔽 ${maskItems.length} 个名字</span>
+    <button type="button" class="tutu-favorite-mask-edit">
+        <i class="fa-solid fa-sliders"></i>
+        设置名字 / 图片
+    </button>
+</div>` : ''}
 
 <div class="tutu-favorite-preview${isHtmlFavorite ? '' : ' tutu-typo-plain'}${!isHtmlFavorite && isTutuTypographyFormatActive() ? ' tutu-typo-formatted' : ''}">
     ${
@@ -1334,6 +1360,14 @@ ${isHtmlFavorite ? '' : `
 $card
     .find('.tutu-favorite-title')
     .text(title);
+
+if (isMasked) {
+    applyTutuNameMaskToElement($card.find('.tutu-favorite-title')[0], maskItems);
+
+    if (!isHtmlFavorite) {
+        applyTutuNameMaskToElement($card.find('.tutu-favorite-preview')[0], maskItems);
+    }
+}
 const itemAvatar =
     getTutuFavoriteCharacterAvatar(
         item,
@@ -1398,7 +1432,7 @@ if (isHtmlFavorite) {
         $card.find('.tutu-favorite-html-iframe')[0];
 
     if (iframe) {
-        iframe.srcdoc = favoriteRendered.html;
+        iframe.srcdoc = injectTutuNameMaskIntoHtml(favoriteRendered.html, maskItems);
     }
 }
 
@@ -2524,6 +2558,457 @@ function saveTutuDialogueOverrides(text, lines) {
     } catch (error) {
         console.warn('[克制放映室] 保存气泡修正失败：', error);
     }
+}
+
+// ==========================================
+// 屏蔽名字：马赛克 / 图片替换，按内容指纹保存
+// ==========================================
+
+const TUTU_NAME_MASK_KEY = 'tutu_theater_name_masks';
+const TUTU_NAME_MASK_LIMIT = 100;
+/** 单张替换图片最大长度（压缩后的 data URL） */
+const TUTU_NAME_MASK_IMAGE_MAX = 60000;
+/** 不自动屏蔽的称呼 */
+const TUTU_NAME_MASK_SKIP = new Set(['AI', 'ai', '我', '你', '您', '他', '她', '它', '自己', '对方', 'user', 'me', '{{user}}', '{{char}}']);
+
+let tutuNameMasks = (() => {
+    try {
+        const data = JSON.parse(localStorage.getItem(TUTU_NAME_MASK_KEY) || '{}');
+        return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+    } catch (error) {
+        return {};
+    }
+})();
+
+function sanitizeTutuMaskImage(value) {
+    const url = String(value || '');
+
+    return /^data:image\/(png|jpeg|webp|gif);base64,[a-z0-9+/=]+$/i.test(url) && url.length <= TUTU_NAME_MASK_IMAGE_MAX
+        ? url
+        : '';
+}
+
+function sanitizeTutuMaskItems(items) {
+    const seen = new Set();
+
+    return (Array.isArray(items) ? items : [])
+        .map(item => ({
+            name: String(item?.name || '').replace(/[\r\n<>]/g, '').trim().slice(0, 20),
+            on: item?.on !== false,
+            image: sanitizeTutuMaskImage(item?.image),
+        }))
+        .filter(item => item.name && !seen.has(item.name) && seen.add(item.name))
+        .slice(0, 30);
+}
+
+/** { enabled, items: [{ name, on, image }] }；没有记录时返回 null */
+function getTutuNameMask(text) {
+    const entry = tutuNameMasks[hashTutuText(text)];
+
+    if (!entry || typeof entry !== 'object') return null;
+
+    return { enabled: Boolean(entry.enabled), items: sanitizeTutuMaskItems(entry.items) };
+}
+
+function saveTutuNameMask(text, mask) {
+    const key = hashTutuText(text);
+    const items = sanitizeTutuMaskItems(mask?.items);
+
+    if (items.length || mask?.enabled) {
+        tutuNameMasks[key] = { enabled: Boolean(mask?.enabled), items, updatedAt: Date.now() };
+    } else {
+        delete tutuNameMasks[key];
+    }
+
+    const keys = Object.keys(tutuNameMasks);
+
+    if (keys.length > TUTU_NAME_MASK_LIMIT) {
+        keys
+            .sort((a, b) => (tutuNameMasks[a]?.updatedAt || 0) - (tutuNameMasks[b]?.updatedAt || 0))
+            .slice(0, keys.length - TUTU_NAME_MASK_LIMIT)
+            .forEach(item => delete tutuNameMasks[item]);
+    }
+
+    try {
+        localStorage.setItem(TUTU_NAME_MASK_KEY, JSON.stringify(tutuNameMasks));
+    } catch (error) {
+        console.warn('[克制放映室] 保存屏蔽名字失败：', error);
+        toastr.error('保存失败：浏览器存储空间不足，可以删掉几张替换图片再试');
+    }
+}
+
+/** 显示时要屏蔽的名字（开启了屏蔽才有） */
+function getTutuActiveMaskItems(text) {
+    const mask = getTutuNameMask(text);
+
+    return mask?.enabled ? mask.items.filter(item => item.on) : [];
+}
+
+/** 不管显示开关，所有勾选的名字（导出用） */
+function getTutuCheckedMaskItems(text) {
+    return (getTutuNameMask(text)?.items || []).filter(item => item.on);
+}
+
+/**
+ * 自动找出内容里出现的名字：
+ * 当前角色名 / 用户名 + 排版识别出的说话人 + 手动改过的名字，只保留正文里真的出现过的。
+ */
+function detectTutuMaskNames(content, characterName = '') {
+    const text = normalizeTutuPlainSource(content);
+    const candidates = new Set();
+    let visible = text;
+
+    if (isProbablyHtml(text)) {
+        try {
+            const doc = new DOMParser().parseFromString(text, 'text/html');
+            doc.querySelectorAll('script, style, noscript, template').forEach(node => node.remove());
+            visible = doc.body ? doc.body.textContent || '' : '';
+        } catch (error) {
+            visible = text.replace(/<[^>]+>/g, ' ');
+        }
+    } else {
+        const container = document.createElement('div');
+        container.innerHTML = formatTutuPlainHtml(text);
+        container.querySelectorAll('.tutu-dialogue-name, .tutu-chat-name').forEach(element => {
+            candidates.add(element.textContent.trim());
+        });
+
+        Object.values(getTutuDialogueOverrides(text)).forEach(item => {
+            if (item?.name) candidates.add(item.name);
+        });
+    }
+
+    candidates.add(String(characterName || '').trim());
+
+    try {
+        const ctx = SillyTavern.getContext();
+        candidates.add(String(ctx?.name1 || '').trim());
+        candidates.add(String(ctx?.name2 || '').trim());
+    } catch (error) {
+        // 非酒馆环境忽略
+    }
+
+    // HTML 小剧场的文字可能由脚本生成，角色名 / 用户名不在静态文字里也保留
+    const contextNames = new Set();
+
+    if (isProbablyHtml(text)) {
+        contextNames.add(String(characterName || '').trim());
+
+        try {
+            const ctx = SillyTavern.getContext();
+            contextNames.add(String(ctx?.name1 || '').trim());
+            contextNames.add(String(ctx?.name2 || '').trim());
+        } catch (error) {
+            // 非酒馆环境忽略
+        }
+    }
+
+    return [...candidates]
+        .filter(name => (
+            name &&
+            Array.from(name).length <= 20 &&
+            !TUTU_NAME_MASK_SKIP.has(name) &&
+            !/^(他|她|它|我|你|您|他们|她们|我们|你们)$/.test(name) &&
+            (visible.includes(name) || contextNames.has(name))
+        ))
+        .sort((a, b) => b.length - a.length);
+}
+
+/**
+ * 在 DOM 里把名字换成马赛克 / 图片。
+ * 会被 toString() 注入到 HTML 小剧场的 iframe 里运行，所以必须自给自足：不用外部变量、不用模板字符串。
+ * 原名字从 DOM 里删掉，复制文字也拿不到。
+ */
+function tutuMaskNamesInDom(root, items, css) {
+    var doc = root.ownerDocument || root;
+    var list = (items || []).filter(function (item) { return item && item.name; })
+        .sort(function (a, b) { return b.name.length - a.name.length; });
+
+    if (css && doc.head && !doc.getElementById('tutu-name-mask-style')) {
+        var style = doc.createElement('style');
+        style.id = 'tutu-name-mask-style';
+        style.textContent = css;
+        doc.head.appendChild(style);
+    }
+
+    if (!list.length) return 0;
+
+    var skip = /^(SCRIPT|STYLE|NOSCRIPT|TEXTAREA|INPUT|SELECT|OPTION|TITLE|TEMPLATE)$/;
+    var walker = doc.createTreeWalker(root, 4, {
+        acceptNode: function (node) {
+            var parent = node.parentNode;
+            while (parent && parent !== root) {
+                if (parent.nodeType === 1 && (skip.test(parent.nodeName) || (parent.classList && parent.classList.contains('tutu-name-mask')))) return 2;
+                parent = parent.parentNode;
+            }
+            return node.nodeValue && node.nodeValue.trim() ? 1 : 2;
+        },
+    });
+    var nodes = [];
+    var count = 0;
+
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+
+    var makeMask = function (item, index) {
+        var element;
+
+        if (item.image) {
+            element = doc.createElement('img');
+            element.src = item.image;
+            element.alt = '';
+            element.className = 'tutu-name-mask tutu-name-mask-image';
+        } else {
+            element = doc.createElement('span');
+            element.className = 'tutu-name-mask tutu-name-mask-mosaic';
+            element.textContent = new Array(Array.from(item.name).length + 1).join('\u3000');
+        }
+
+        element.setAttribute('data-tutu-mask', String(index));
+        element.setAttribute('role', 'img');
+        element.setAttribute('aria-label', '已屏蔽的名字');
+        return element;
+    };
+
+    nodes.forEach(function (node) {
+        var value = node.nodeValue;
+        var hits = [];
+        var pos = 0;
+
+        while (pos < value.length) {
+            var found = null;
+
+            for (var i = 0; i < list.length; i++) {
+                if (value.startsWith(list[i].name, pos)) { found = i; break; }
+            }
+
+            if (found === null) { pos++; continue; }
+
+            hits.push([pos, found]);
+            pos += list[found].name.length;
+        }
+
+        if (!hits.length) return;
+
+        var fragment = doc.createDocumentFragment();
+        var last = 0;
+
+        hits.forEach(function (hit) {
+            if (hit[0] > last) fragment.appendChild(doc.createTextNode(value.slice(last, hit[0])));
+            fragment.appendChild(makeMask(list[hit[1]], hit[1]));
+            last = hit[0] + list[hit[1]].name.length;
+            count++;
+        });
+
+        if (last < value.length) fragment.appendChild(doc.createTextNode(value.slice(last)));
+        node.parentNode.replaceChild(fragment, node);
+    });
+
+    // 聊天气泡的头像显示的是名字首字：名字被屏蔽时头像也一起换
+    var rows = root.querySelectorAll ? root.querySelectorAll('.tutu-chat-row') : [];
+
+    Array.prototype.forEach.call(rows, function (row) {
+        var mask = row.querySelector('.tutu-chat-name .tutu-name-mask');
+        var avatar = row.querySelector('.tutu-chat-avatar');
+
+        if (!mask || !avatar || avatar.classList.contains('tutu-avatar-masked')) return;
+
+        var item = list[Number(mask.getAttribute('data-tutu-mask'))];
+
+        avatar.textContent = '';
+        avatar.classList.add('tutu-avatar-masked');
+
+        if (item && item.image) {
+            avatar.style.backgroundImage = 'url("' + item.image + '")';
+            avatar.classList.add('tutu-avatar-masked-image');
+        }
+    });
+
+    return count;
+}
+
+const TUTU_NAME_MASK_CSS = `
+.tutu-name-mask { display: inline-block; vertical-align: middle; user-select: none; }
+.tutu-name-mask-mosaic {
+    min-width: 1.6em;
+    height: 1.05em;
+    line-height: 1;
+    overflow: hidden;
+    border-radius: 2px;
+    color: transparent !important;
+    background-color: #8d8d8d !important;
+    background-image:
+        linear-gradient(45deg, rgba(0,0,0,.28) 25%, transparent 25%, transparent 75%, rgba(0,0,0,.28) 75%),
+        linear-gradient(45deg, rgba(0,0,0,.28) 25%, transparent 25%, transparent 75%, rgba(0,0,0,.28) 75%),
+        linear-gradient(90deg, rgba(255,255,255,.18), rgba(0,0,0,.12), rgba(255,255,255,.12));
+    background-size: 0.36em 0.36em, 0.36em 0.36em, 100% 100%;
+    background-position: 0 0, 0.18em 0.18em, 0 0;
+}
+.tutu-name-mask-image {
+    height: 1.25em;
+    width: auto;
+    max-width: 6em;
+    object-fit: contain;
+    border-radius: 3px;
+    margin: 0 0.05em;
+}
+.tutu-chat-avatar.tutu-avatar-masked {
+    color: transparent !important;
+    background-color: #8d8d8d !important;
+    background-image:
+        linear-gradient(45deg, rgba(0,0,0,.28) 25%, transparent 25%, transparent 75%, rgba(0,0,0,.28) 75%),
+        linear-gradient(45deg, rgba(0,0,0,.28) 25%, transparent 25%, transparent 75%, rgba(0,0,0,.28) 75%);
+    background-size: 8px 8px;
+    background-position: 0 0, 4px 4px;
+}
+.tutu-chat-avatar.tutu-avatar-masked-image {
+    background-size: cover !important;
+    background-position: center !important;
+    background-repeat: no-repeat !important;
+}
+`;
+
+/** 注入 iframe 的屏蔽脚本：页面脚本后来生成的文字也会被屏蔽，屏蔽的块不能双击改名 */
+function buildTutuNameMaskScript(items) {
+    const data = JSON.stringify(items.map(item => ({ name: item.name, image: item.image || '' })))
+        .replace(/</g, '\\u003c')
+        .replace(/\u2028/g, '\\u2028')
+        .replace(/\u2029/g, '\\u2029');
+    const css = JSON.stringify(TUTU_NAME_MASK_CSS).replace(/</g, '\\u003c');
+
+    return `<script>
+(function () {
+    var mask = ${tutuMaskNamesInDom.toString()};
+    var items = ${data};
+    var css = ${css};
+    var run = function () { if (document.body) mask(document.body, items, css); };
+    var timer = 0;
+    run();
+    document.addEventListener('DOMContentLoaded', run);
+    window.addEventListener('load', run);
+    try {
+        new MutationObserver(function () {
+            clearTimeout(timer);
+            timer = setTimeout(run, 60);
+        }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+    } catch (e) {}
+    document.addEventListener('dblclick', function (event) {
+        var block = event.target.closest && event.target.closest('[data-tutu-line]');
+        if (block && block.querySelector('.tutu-name-mask')) event.stopImmediatePropagation();
+    }, true);
+})();
+<\/script>`;
+}
+
+/** 给 iframe 文档加上屏蔽脚本 */
+function injectTutuNameMaskIntoHtml(html, items) {
+    if (!items || !items.length) return html;
+
+    const script = buildTutuNameMaskScript(items);
+
+    return /<\/body>/i.test(html)
+        ? html.replace(/<\/body>(?![\s\S]*<\/body>)/i, `${script}</body>`)
+        : `${html}${script}`;
+}
+
+function ensureTutuNameMaskPageStyle() {
+    if (document.getElementById('tutu-name-mask-style')) return;
+
+    const style = document.createElement('style');
+    style.id = 'tutu-name-mask-style';
+    style.textContent = TUTU_NAME_MASK_CSS;
+    document.head.appendChild(style);
+}
+
+/** 页面上的元素（收藏预览、全屏）直接屏蔽 */
+function applyTutuNameMaskToElement(element, items) {
+    if (!element || !items || !items.length) return 0;
+
+    ensureTutuNameMaskPageStyle();
+    element.classList.add('tutu-name-masked');
+
+    return tutuMaskNamesInDom(element, items, '');
+}
+
+/** 纯文字里的名字换成 ■（TXT 导出、书摘图片用） */
+function maskTutuNamesInText(text, items) {
+    let result = String(text || '');
+
+    [...(items || [])]
+        .sort((a, b) => b.name.length - a.name.length)
+        .forEach(item => {
+            result = result.split(item.name).join('■'.repeat(Array.from(item.name).length));
+        });
+
+    return result;
+}
+
+/** 名字是否被屏蔽：标题、文件名里的角色名也一起换 */
+function maskTutuNameLabel(name, items) {
+    const value = String(name || '');
+
+    return (items || []).some(item => value.includes(item.name))
+        ? maskTutuNamesInText(value, items)
+        : value;
+}
+
+/** 读取图片并压缩成小图（高 96px 以内），存进 localStorage 也不占地方 */
+function readTutuMaskImage(file) {
+    return new Promise((resolve, reject) => {
+        if (!file || !/^image\//.test(file.type)) {
+            reject(new Error('请选择图片文件'));
+            return;
+        }
+
+        if (file.size > 10 * 1024 * 1024) {
+            reject(new Error('图片太大了（超过 10MB）'));
+            return;
+        }
+
+        const url = URL.createObjectURL(file);
+        const image = new Image();
+
+        image.onload = () => {
+            URL.revokeObjectURL(url);
+
+            const canvas = document.createElement('canvas');
+            const encode = (maxH, maxW, type, quality) => {
+                const scale = Math.min(1, maxH / image.naturalHeight, maxW / image.naturalWidth);
+                canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+                canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+
+                const context = canvas.getContext('2d');
+                context.clearRect(0, 0, canvas.width, canvas.height);
+                context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+                return canvas.toDataURL(type, quality);
+            };
+
+            const attempts = [
+                [96, 384, 'image/webp', 0.86],
+                [96, 384, 'image/png'],
+                [72, 288, 'image/webp', 0.75],
+                [64, 256, 'image/jpeg', 0.7],
+            ];
+
+            for (const args of attempts) {
+                const data = encode(...args);
+
+                if (sanitizeTutuMaskImage(data)) {
+                    resolve(data);
+                    return;
+                }
+            }
+
+            reject(new Error('图片压缩后仍然太大，换一张简单些的图片'));
+        };
+
+        image.onerror = () => {
+            URL.revokeObjectURL(url);
+            reject(new Error('图片读取失败'));
+        };
+
+        image.src = url;
+    });
 }
 
 function parseTutuDialogueLine(line) {
@@ -3830,6 +4315,43 @@ function syncTutuRenderBindCategoryChecks() {
 }
 
 /**
+ * 重新渲染全屏查看：气泡修正、屏蔽名字变化后调用。
+ * htmlToo：HTML 小剧场也重载（屏蔽名字变化时需要；气泡修正不影响 HTML）。
+ */
+function refreshTutuFullscreenView({ htmlToo = false } = {}) {
+    const overlay = document.getElementById('tutu_theater_fullscreen');
+    const useMask = Boolean(overlay?._tutuNameMask);
+
+    document.querySelectorAll('.tutu-fullscreen-plain').forEach(element => {
+        if (!element._tutuSourceText) return;
+
+        fillTutuPlainText(element, element._tutuSourceText);
+        if (useMask) applyTutuNameMaskToElement(element, getTutuActiveMaskItems(element._tutuSourceText));
+    });
+
+    document.querySelectorAll('.tutu-fullscreen-iframe').forEach(iframe => {
+        const source = iframe._tutuSourceText;
+
+        if (!source || (!htmlToo && isProbablyHtml(source))) return;
+
+        iframe.srcdoc = injectTutuNameMaskIntoHtml(
+            buildTutuRenderedContent(source).html,
+            useMask ? getTutuActiveMaskItems(source) : []
+        );
+    });
+
+    const source = document.querySelector('.tutu-fullscreen-plain, .tutu-fullscreen-iframe')?._tutuSourceText;
+    const title = overlay?.querySelector('.tutu-fullscreen-title');
+
+    if (title && source) {
+        title.textContent = `🐱 克制放映室 · ${maskTutuNameLabel(
+            overlay._tutuCharacterName || 'AI',
+            useMask ? getTutuActiveMaskItems(source) : []
+        )}`;
+    }
+}
+
+/**
  * 渲染规则变化后，重新渲染面板当前结果和已嵌入楼层。
  */
 function refreshTutuCurrentRender() {
@@ -3838,15 +4360,7 @@ function refreshTutuCurrentRender() {
         ...document.querySelectorAll('#tutu_theater_panel *, .tutu-fullscreen-body, #chat'),
     ].filter(element => element.scrollTop > 0).map(element => [element, element.scrollTop]);
 
-    document.querySelectorAll('.tutu-fullscreen-plain').forEach(element => {
-        if (element._tutuSourceText) fillTutuPlainText(element, element._tutuSourceText);
-    });
-
-    document.querySelectorAll('.tutu-fullscreen-iframe').forEach(iframe => {
-        if (iframe._tutuSourceText && !isProbablyHtml(iframe._tutuSourceText)) {
-            iframe.srcdoc = buildTutuRenderedContent(iframe._tutuSourceText).html;
-        }
-    });
+    refreshTutuFullscreenView({ htmlToo: false });
 
     if (String(tutuCurrentResultContent || '').trim()) {
         const status = $('#tutu_result_status').text();
@@ -4203,14 +4717,6 @@ localStorage.setItem(
     </div>
 
     <div class="tutu-result-toolbar-right">
-<select
-    id="tutu_export_format"
-    class="text_pole tutu-export-format-select"
-    title="选择导出格式">
-    <option value="text">纯文本 TXT</option>
-    <option value="image">书摘图片 PNG</option>
-</select>
-
 
 
         <div
@@ -4233,7 +4739,7 @@ localStorage.setItem(
 <div
     id="tutu_export_current_btn"
     class="tutu-result-mode-btn"
-    title="导出当前小剧场">
+    title="导出：带排版的长图 / 网页 / TXT / 书摘图片，可屏蔽名字">
     <i class="fa-solid fa-file-export"></i>
 </div>
 
@@ -7230,9 +7736,14 @@ function favoriteTutuContent(
 }
 
 
+/**
+ * 导出入口：打开导出面板（格式 / 保留排版 / 屏蔽名字）。
+ * options.maskNames：屏蔽名字的初始勾选，不传时用上次的选择。
+ */
 function exportTutuContent(
     content,
-    characterName = 'AI'
+    characterName = 'AI',
+    options = {}
 ) {
     const text = String(content || '').trim();
 
@@ -7241,36 +7752,11 @@ function exportTutuContent(
         return;
     }
 
-    const finalCharacterName =
-        String(characterName || 'AI').trim() || 'AI';
-
-    /*
-     * HTML 内容直接导出为 HTML 文件
-     */
-    if (isProbablyHtml(text)) {
-        exportTutuHtmlFile(
-            text,
-            finalCharacterName
-        );
-
-        return;
-    }
-
-const exportFormat =
-    $('#tutu_export_format').val() || 'text';
-
-if (exportFormat === 'text') {
-    exportTutuTextFile(
+    openTutuExportDialog(
         text,
-        finalCharacterName
+        String(characterName || 'AI').trim() || 'AI',
+        options
     );
-
-    return;
-}
-
-// 打开书摘编辑器
-openTutuQuoteEditor(text, finalCharacterName);
-
 }
 // ==========================================
 // 书摘图片编辑器
@@ -7672,7 +8158,8 @@ function renderTutuQuotePreview() {
  */
 function openTutuTheaterFullscreen(
     content,
-    characterName = 'AI'
+    characterName = 'AI',
+    options = {}
 ) {
     const text = String(content || '').trim();
 
@@ -7686,8 +8173,14 @@ function openTutuTheaterFullscreen(
     const finalCharacterName =
         String(characterName || 'AI').trim() || 'AI';
 
+    // 从收藏打开时按收藏的屏蔽设置显示
+    const useNameMask = Boolean(options.nameMask);
+    const maskItems = useNameMask ? getTutuActiveMaskItems(text) : [];
+
     const overlay = document.createElement('div');
     overlay.id = 'tutu_theater_fullscreen';
+    overlay._tutuNameMask = useNameMask;
+    overlay._tutuCharacterName = finalCharacterName;
 
     const header = document.createElement('div');
     header.className = 'tutu-fullscreen-header';
@@ -7695,7 +8188,7 @@ function openTutuTheaterFullscreen(
     const title = document.createElement('div');
     title.className = 'tutu-fullscreen-title';
     title.textContent =
-        `🐱 克制放映室 · ${finalCharacterName}`;
+        `🐱 克制放映室 · ${maskTutuNameLabel(finalCharacterName, maskItems)}`;
 
     const actions = document.createElement('div');
     actions.className = 'tutu-fullscreen-actions';
@@ -7770,7 +8263,7 @@ function openTutuTheaterFullscreen(
             'allow-scripts allow-forms allow-modals'
         );
 
-        iframe.srcdoc = rendered.html;
+        iframe.srcdoc = injectTutuNameMaskIntoHtml(rendered.html, maskItems);
 
         body.appendChild(iframe);
     } else {
@@ -7778,6 +8271,7 @@ function openTutuTheaterFullscreen(
 
         plain.className = 'tutu-fullscreen-plain';
         fillTutuPlainText(plain, text);
+        applyTutuNameMaskToElement(plain, maskItems);
 
         // 修正气泡后按原文重新渲染
         plain._tutuSourceText = text;
@@ -8186,6 +8680,14 @@ $(document).on('dblclick', '.tutu-typo-formatted [data-tutu-line][data-tutu-src]
     // 嵌套时只处理最内层
     if (event.target.closest('[data-tutu-line][data-tutu-src]') !== block) return;
 
+    // 屏蔽的名字不能双击改名（改名会露出原名字）
+    if (block.closest('.tutu-name-masked') && block.querySelector('.tutu-name-mask')) {
+        event.preventDefault();
+        event.stopPropagation();
+        toastr.info('这一段的名字已屏蔽，先取消屏蔽再修改');
+        return;
+    }
+
     const text = tutuRenderedSources.get(block.getAttribute('data-tutu-src'));
     const lineIndex = Number(block.getAttribute('data-tutu-line'));
 
@@ -8545,6 +9047,923 @@ $(document).on('click', '#tutu_dialogue_editor .tutu-dialogue-editor-reset', fun
 $(document).on('click', '#tutu_dialogue_editor .tutu-dialogue-editor-done', function () {
     closeTutuDialogueEditor();
 });
+
+// ==========================================
+// 屏蔽名字：设置面板
+// ==========================================
+
+let tutuNameMaskEditor = null;   // { text, characterName, onChange }
+
+/** 屏蔽设置变化后刷新收藏和全屏 */
+function refreshTutuNameMaskViews() {
+    const scrollers = [...document.querySelectorAll('#tutu_theater_panel *, .tutu-fullscreen-body')]
+        .filter(element => element.scrollTop > 0)
+        .map(element => [element, element.scrollTop]);
+
+    try {
+        renderTutuFavorites();
+    } catch (error) {
+        console.warn('[克制放映室] 刷新收藏失败：', error);
+    }
+
+    refreshTutuFullscreenView({ htmlToo: true });
+
+    scrollers.forEach(([element, top]) => {
+        if (element.isConnected) element.scrollTop = top;
+    });
+}
+
+/** 开启 / 关闭某段内容的屏蔽；第一次开启时自动识别名字 */
+function toggleTutuNameMask(text, characterName) {
+    const mask = getTutuNameMask(text) || { enabled: false, items: [] };
+
+    if (mask.enabled && mask.items.some(item => item.on)) {
+        saveTutuNameMask(text, { ...mask, enabled: false });
+        refreshTutuNameMaskViews();
+        toastr.info('已取消屏蔽名字');
+        return;
+    }
+
+    if (!mask.items.length) {
+        mask.items = detectTutuMaskNames(text, characterName).map(name => ({ name, on: true, image: '' }));
+    }
+
+    if (!mask.items.some(item => item.on)) {
+        toastr.info('没有识别到名字，请手动添加');
+        openTutuNameMaskEditor(text, characterName);
+        return;
+    }
+
+    saveTutuNameMask(text, { ...mask, enabled: true });
+    refreshTutuNameMaskViews();
+
+    const names = mask.items.filter(item => item.on).length;
+    toastr.success(`已屏蔽 ${names} 个名字，点「设置名字 / 图片」可以改名单或换成图片`);
+}
+
+function openTutuNameMaskEditor(content, characterName = '', onChange = null) {
+    const text = normalizeTutuPlainSource(content);
+
+    if (!text) return;
+
+    closeTutuNameMaskEditor();
+
+    // 第一次打开时先自动识别一遍
+    if (!getTutuNameMask(text)) {
+        saveTutuNameMask(text, {
+            enabled: false,
+            items: detectTutuMaskNames(text, characterName).map(name => ({ name, on: true, image: '' })),
+        });
+    }
+
+    tutuNameMaskEditor = { text, characterName, onChange };
+
+    const modal = document.createElement('div');
+    modal.id = 'tutu_name_mask_editor';
+    modal.className = 'tutu-dialogue-editor-overlay';
+    modal.innerHTML = `
+        <div class="tutu-dialogue-editor tutu-name-mask-editor" role="dialog" aria-modal="true" aria-label="屏蔽名字">
+            <div class="tutu-dialogue-editor-head">
+                <div class="tutu-dialogue-editor-title">
+                    <i class="fa-solid fa-user-secret"></i>
+                    屏蔽名字
+                </div>
+                <div class="tutu-dialogue-editor-actions">
+                    <button type="button" class="menu_button margin0 tutu-name-mask-detect" title="重新从正文里找名字（保留已有的）">
+                        <i class="fa-solid fa-wand-magic-sparkles"></i>
+                        <span>识别名字</span>
+                    </button>
+                    <button type="button" class="menu_button margin0 tutu-name-mask-done" title="关闭（改动已自动保存）">
+                        <i class="fa-solid fa-check"></i>
+                        <span>完成</span>
+                    </button>
+                </div>
+            </div>
+            <label class="tutu-name-mask-switch">
+                <input type="checkbox" class="tutu-name-mask-enabled">
+                <span>收藏和全屏查看时屏蔽</span>
+            </label>
+            <div class="tutu-dialogue-editor-hint">
+                勾选的名字会在正文、对话气泡、聊天头像里一起换掉：默认打马赛克，导入图片后换成图片。原名字不会出现在页面里，复制也拿不到。导出时可以单独选择是否屏蔽。
+            </div>
+            <div class="tutu-dialogue-editor-list tutu-name-mask-list"></div>
+            <div class="tutu-name-mask-add">
+                <input type="text" class="text_pole tutu-name-mask-add-input" maxlength="20" placeholder="添加名字，例如：周远">
+                <button type="button" class="menu_button margin0 tutu-name-mask-add-btn">
+                    <i class="fa-solid fa-plus"></i>
+                    <span>添加</span>
+                </button>
+            </div>
+            <input type="file" class="tutu-name-mask-file" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+        </div>`;
+
+    document.body.appendChild(modal);
+    renderTutuNameMaskEditor();
+
+    modal.querySelector('.tutu-name-mask-done').focus();
+
+    modal._tutuEscHandler = event => {
+        if (event.key === 'Escape') {
+            event.stopPropagation();
+            closeTutuNameMaskEditor();
+        }
+    };
+
+    document.addEventListener('keydown', modal._tutuEscHandler, true);
+}
+
+function closeTutuNameMaskEditor() {
+    const modal = document.getElementById('tutu_name_mask_editor');
+
+    if (modal) {
+        document.removeEventListener('keydown', modal._tutuEscHandler, true);
+        modal.remove();
+    }
+
+    tutuNameMaskEditor = null;
+}
+
+function renderTutuNameMaskEditor() {
+    const modal = document.getElementById('tutu_name_mask_editor');
+
+    if (!modal || !tutuNameMaskEditor) return;
+
+    const mask = getTutuNameMask(tutuNameMaskEditor.text) || { enabled: false, items: [] };
+
+    modal.querySelector('.tutu-name-mask-enabled').checked = mask.enabled;
+
+    const list = modal.querySelector('.tutu-name-mask-list');
+
+    if (!mask.items.length) {
+        list.innerHTML = '<div class="tutu-dialogue-editor-empty">还没有名字。点「识别名字」，或在下面手动添加。</div>';
+        return;
+    }
+
+    list.innerHTML = mask.items.map((item, index) => `
+        <div class="tutu-name-mask-row${item.on ? '' : ' off'}" data-index="${index}">
+            <label class="tutu-name-mask-check" title="${item.on ? '取消勾选：不屏蔽这个名字' : '勾选：屏蔽这个名字'}">
+                <input type="checkbox" class="tutu-name-mask-on"${item.on ? ' checked' : ''}>
+                <span class="tutu-name-mask-name">${escapeHtml(item.name)}</span>
+            </label>
+            <span class="tutu-name-mask-arrow" aria-hidden="true">→</span>
+            <span class="tutu-name-mask-preview">
+                ${item.image
+                    ? `<img class="tutu-name-mask tutu-name-mask-image" src="${escapeHtml(item.image)}" alt="替换图片">`
+                    : `<span class="tutu-name-mask tutu-name-mask-mosaic" aria-label="马赛克">${'\u3000'.repeat(Array.from(item.name).length)}</span>`}
+            </span>
+            <span class="tutu-name-mask-row-actions">
+                <button type="button" class="menu_button margin0 tutu-name-mask-image-btn" title="导入图片替换这个名字">
+                    <i class="fa-solid fa-image"></i>
+                    <span>${item.image ? '换图' : '用图片'}</span>
+                </button>
+                ${item.image ? `
+                <button type="button" class="menu_button margin0 tutu-name-mask-mosaic-btn" title="去掉图片，改回马赛克">
+                    <i class="fa-solid fa-chess-board"></i>
+                    <span>马赛克</span>
+                </button>` : ''}
+                <button type="button" class="menu_button margin0 tutu-name-mask-remove" title="从名单里删掉">
+                    <i class="fa-solid fa-trash"></i>
+                </button>
+            </span>
+        </div>`).join('');
+
+    ensureTutuNameMaskPageStyle();
+}
+
+/** 改名单：patch(items) 返回新名单 */
+function updateTutuNameMaskItems(patch) {
+    if (!tutuNameMaskEditor) return;
+
+    const { text } = tutuNameMaskEditor;
+    const mask = getTutuNameMask(text) || { enabled: false, items: [] };
+
+    saveTutuNameMask(text, { ...mask, items: patch(mask.items.map(item => ({ ...item }))) });
+    renderTutuNameMaskEditor();
+    refreshTutuNameMaskViews();
+    tutuNameMaskEditor?.onChange?.();
+}
+
+$(document).on('click', '.tutu-favorite-mask-btn', function (event) {
+    event.stopPropagation();
+
+    const id = String($(this).closest('.tutu-favorite-card').data('id'));
+    const favorite = loadTutuFavorites().find(item => String(item.id) === id);
+
+    if (!favorite) {
+        toastr.error('找不到这条收藏');
+        return;
+    }
+
+    toggleTutuNameMask(favorite.content, favorite.characterName);
+});
+
+$(document).on('keydown', '.tutu-favorite-mask-btn', function (event) {
+    if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        $(this).trigger('click');
+    }
+});
+
+$(document).on('click', '.tutu-favorite-mask-edit', function (event) {
+    event.stopPropagation();
+
+    const id = String($(this).closest('.tutu-favorite-card').data('id'));
+    const favorite = loadTutuFavorites().find(item => String(item.id) === id);
+
+    if (favorite) openTutuNameMaskEditor(favorite.content, favorite.characterName);
+});
+
+$(document).on('click', '#tutu_name_mask_editor', function (event) {
+    if (event.target === this) closeTutuNameMaskEditor();
+});
+
+$(document).on('click', '#tutu_name_mask_editor .tutu-name-mask-done', closeTutuNameMaskEditor);
+
+$(document).on('change', '#tutu_name_mask_editor .tutu-name-mask-enabled', function () {
+    if (!tutuNameMaskEditor) return;
+
+    const { text } = tutuNameMaskEditor;
+    const mask = getTutuNameMask(text) || { enabled: false, items: [] };
+
+    if (this.checked && !mask.items.some(item => item.on)) {
+        this.checked = false;
+        toastr.warning('先添加或勾选要屏蔽的名字');
+        return;
+    }
+
+    saveTutuNameMask(text, { ...mask, enabled: this.checked });
+    refreshTutuNameMaskViews();
+    tutuNameMaskEditor?.onChange?.();
+});
+
+$(document).on('change', '#tutu_name_mask_editor .tutu-name-mask-on', function () {
+    const index = Number($(this).closest('.tutu-name-mask-row').attr('data-index'));
+    const on = this.checked;
+
+    updateTutuNameMaskItems(items => items.map((item, i) => (i === index ? { ...item, on } : item)));
+});
+
+$(document).on('click', '#tutu_name_mask_editor .tutu-name-mask-remove', function () {
+    const index = Number($(this).closest('.tutu-name-mask-row').attr('data-index'));
+
+    updateTutuNameMaskItems(items => items.filter((item, i) => i !== index));
+});
+
+$(document).on('click', '#tutu_name_mask_editor .tutu-name-mask-mosaic-btn', function () {
+    const index = Number($(this).closest('.tutu-name-mask-row').attr('data-index'));
+
+    updateTutuNameMaskItems(items => items.map((item, i) => (i === index ? { ...item, image: '' } : item)));
+});
+
+$(document).on('click', '#tutu_name_mask_editor .tutu-name-mask-image-btn', function () {
+    const modal = document.getElementById('tutu_name_mask_editor');
+    const input = modal?.querySelector('.tutu-name-mask-file');
+
+    if (!input) return;
+
+    input.dataset.index = $(this).closest('.tutu-name-mask-row').attr('data-index');
+    input.value = '';
+    input.click();
+});
+
+$(document).on('change', '#tutu_name_mask_editor .tutu-name-mask-file', async function () {
+    const index = Number(this.dataset.index);
+    const file = this.files?.[0];
+
+    if (!file || !Number.isInteger(index)) return;
+
+    try {
+        const image = await readTutuMaskImage(file);
+        updateTutuNameMaskItems(items => items.map((item, i) => (i === index ? { ...item, image, on: true } : item)));
+        toastr.success('已换成图片');
+    } catch (error) {
+        toastr.error(error.message || '图片导入失败');
+    }
+});
+
+function addTutuNameMaskFromInput() {
+    const modal = document.getElementById('tutu_name_mask_editor');
+    const input = modal?.querySelector('.tutu-name-mask-add-input');
+    const name = String(input?.value || '').replace(/[\r\n<>]/g, '').trim();
+
+    if (!name) return;
+
+    const mask = getTutuNameMask(tutuNameMaskEditor?.text || '') || { items: [] };
+
+    if (mask.items.some(item => item.name === name)) {
+        toastr.info('这个名字已经在名单里了');
+        return;
+    }
+
+    if (!String(tutuNameMaskEditor?.text || '').includes(name)) {
+        toastr.info('正文里没有找到这个名字，仍然加进名单');
+    }
+
+    updateTutuNameMaskItems(items => [...items, { name, on: true, image: '' }]);
+    modal.querySelector('.tutu-name-mask-add-input')?.focus();
+}
+
+$(document).on('click', '#tutu_name_mask_editor .tutu-name-mask-add-btn', addTutuNameMaskFromInput);
+
+$(document).on('keydown', '#tutu_name_mask_editor .tutu-name-mask-add-input', function (event) {
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        addTutuNameMaskFromInput();
+    }
+});
+
+$(document).on('click', '#tutu_name_mask_editor .tutu-name-mask-detect', function () {
+    if (!tutuNameMaskEditor) return;
+
+    const found = detectTutuMaskNames(tutuNameMaskEditor.text, tutuNameMaskEditor.characterName);
+    let added = 0;
+
+    updateTutuNameMaskItems(items => {
+        found.forEach(name => {
+            if (!items.some(item => item.name === name)) {
+                items.push({ name, on: true, image: '' });
+                added++;
+            }
+        });
+
+        return items;
+    });
+
+    toastr.info(added ? `新找到 ${added} 个名字` : '没有找到新的名字');
+});
+
+// ==========================================
+// 导出面板：格式 / 保留排版 / 屏蔽名字
+// ==========================================
+
+const TUTU_EXPORT_FORMATS = [
+    { value: 'styled-png', icon: 'fa-image', label: '长图 PNG', desc: '和预览一样：气泡、背景、排版都保留' },
+    { value: 'styled-html', icon: 'fa-globe', label: '网页 HTML', desc: '带排版的网页，手机电脑都能打开' },
+    { value: 'text', icon: 'fa-file-lines', label: '纯文本 TXT', desc: '只有文字' },
+    { value: 'quote', icon: 'fa-quote-left', label: '书摘图片', desc: '书摘卡片样式（杂志、信笺、稿纸……）' },
+];
+
+let tutuExportDialogState = null;   // { text, characterName, isHtml }
+
+function getTutuExportOptions() {
+    const saved = tutuSettings.exportOptions || {};
+
+    return {
+        format: TUTU_EXPORT_FORMATS.some(item => item.value === saved.format) ? saved.format : 'styled-png',
+        keepStyle: saved.keepStyle !== false,
+        maskNames: Boolean(saved.maskNames),
+    };
+}
+
+function openTutuExportDialog(text, characterName, options = {}) {
+    closeTutuExportDialog();
+
+    const isHtml = isProbablyHtml(text);
+    const saved = getTutuExportOptions();
+    const maskNames = typeof options.maskNames === 'boolean' ? options.maskNames : saved.maskNames;
+
+    tutuExportDialogState = { text, characterName, isHtml };
+
+    const formats = isHtml
+        ? [{ value: 'html', icon: 'fa-code', label: 'HTML 文件', desc: 'HTML 小剧场按原样导出，交互效果保留' }]
+        : TUTU_EXPORT_FORMATS;
+    const format = isHtml ? 'html' : saved.format;
+
+    const modal = document.createElement('div');
+    modal.id = 'tutu_export_dialog';
+    modal.className = 'tutu-dialogue-editor-overlay';
+    modal.innerHTML = `
+        <div class="tutu-dialogue-editor tutu-export-dialog" role="dialog" aria-modal="true" aria-label="导出小剧场">
+            <div class="tutu-dialogue-editor-head">
+                <div class="tutu-dialogue-editor-title">
+                    <i class="fa-solid fa-file-export"></i>
+                    导出小剧场
+                </div>
+                <div class="tutu-dialogue-editor-actions">
+                    <button type="button" class="menu_button margin0 tutu-export-cancel" title="关闭">
+                        <i class="fa-solid fa-xmark"></i>
+                    </button>
+                </div>
+            </div>
+
+            <div class="tutu-export-section-label" id="tutu_export_format_label">格式</div>
+            <div class="tutu-export-formats" role="radiogroup" aria-labelledby="tutu_export_format_label">
+                ${formats.map(item => `
+                    <label class="tutu-export-format${item.value === format ? ' active' : ''}">
+                        <input type="radio" name="tutu_export_format" value="${item.value}"${item.value === format ? ' checked' : ''}>
+                        <i class="fa-solid ${item.icon}" aria-hidden="true"></i>
+                        <span class="tutu-export-format-text">
+                            <strong>${item.label}</strong>
+                            <small>${item.desc}</small>
+                        </span>
+                    </label>`).join('')}
+            </div>
+
+            ${isHtml ? '' : `
+            <label class="tutu-export-option tutu-export-keep">
+                <input type="checkbox" class="tutu-export-keep-style"${saved.keepStyle ? ' checked' : ''}>
+                <span>
+                    <strong>保留气泡、背景和排版样式</strong>
+                    <small>按「排版美化」的字体、颜色、背景、对话 / 聊天气泡导出；关掉就是素净的白底文字</small>
+                </span>
+            </label>`}
+
+            <label class="tutu-export-option">
+                <input type="checkbox" class="tutu-export-mask"${maskNames ? ' checked' : ''}>
+                <span>
+                    <strong>屏蔽名字</strong>
+                    <small class="tutu-export-mask-summary"></small>
+                </span>
+            </label>
+            <button type="button" class="menu_button margin0 tutu-export-mask-edit">
+                <i class="fa-solid fa-user-secret"></i>
+                <span>设置要屏蔽的名字 / 替换图片</span>
+            </button>
+
+            <div class="tutu-export-foot">
+                <button type="button" class="menu_button margin0 tutu-export-cancel">取消</button>
+                <button type="button" class="menu_button margin0 tutu-export-go">
+                    <i class="fa-solid fa-download"></i>
+                    <span>导出</span>
+                </button>
+            </div>
+        </div>`;
+
+    document.body.appendChild(modal);
+    updateTutuExportDialog();
+
+    modal.querySelector('.tutu-export-go').focus();
+
+    modal._tutuEscHandler = event => {
+        if (event.key === 'Escape' && !document.getElementById('tutu_name_mask_editor')) {
+            event.stopPropagation();
+            closeTutuExportDialog();
+        }
+    };
+
+    document.addEventListener('keydown', modal._tutuEscHandler, true);
+}
+
+function closeTutuExportDialog() {
+    const modal = document.getElementById('tutu_export_dialog');
+
+    if (modal) {
+        document.removeEventListener('keydown', modal._tutuEscHandler, true);
+        modal.remove();
+    }
+
+    tutuExportDialogState = null;
+}
+
+/** 刷新导出面板：选中的格式、书摘不支持保留排版、屏蔽名单摘要 */
+function updateTutuExportDialog() {
+    const modal = document.getElementById('tutu_export_dialog');
+
+    if (!modal || !tutuExportDialogState) return;
+
+    const format = modal.querySelector('input[name="tutu_export_format"]:checked')?.value || '';
+
+    modal.querySelectorAll('.tutu-export-format').forEach(label => {
+        label.classList.toggle('active', label.querySelector('input').checked);
+    });
+
+    const keep = modal.querySelector('.tutu-export-keep');
+
+    if (keep) {
+        const disabled = format === 'text' || format === 'quote';
+        keep.classList.toggle('disabled', disabled);
+        keep.querySelector('input').disabled = disabled;
+        keep.title = disabled ? 'TXT 和书摘图片有自己的样式，不使用排版美化' : '';
+    }
+
+    const items = getTutuCheckedMaskItems(tutuExportDialogState.text);
+    const masked = modal.querySelector('.tutu-export-mask').checked;
+    const summary = modal.querySelector('.tutu-export-mask-summary');
+    const images = items.filter(item => item.image).length;
+
+    summary.textContent = items.length
+        ? `${masked ? '将屏蔽' : '可屏蔽'}：${items.map(item => item.name).slice(0, 5).join('、')}${items.length > 5 ? ` 等 ${items.length} 个` : ''}`
+            + `（${images ? `${images} 个换成图片，` : ''}${format === 'text' || format === 'quote' ? '文字里换成 ■' : '其余打马赛克'}）`
+        : '还没有名单，勾选时自动识别';
+}
+
+$(document).on('click', '#tutu_export_dialog', function (event) {
+    if (event.target === this) closeTutuExportDialog();
+});
+
+$(document).on('click', '#tutu_export_dialog .tutu-export-cancel', closeTutuExportDialog);
+
+$(document).on('change', '#tutu_export_dialog input[name="tutu_export_format"]', updateTutuExportDialog);
+
+$(document).on('change', '#tutu_export_dialog .tutu-export-mask', function () {
+    const state = tutuExportDialogState;
+
+    if (this.checked && state && !getTutuCheckedMaskItems(state.text).length) {
+        const names = detectTutuMaskNames(state.text, state.characterName);
+        const mask = getTutuNameMask(state.text) || { enabled: false, items: [] };
+
+        if (names.length) {
+            saveTutuNameMask(state.text, {
+                ...mask,
+                items: [...mask.items, ...names.filter(name => !mask.items.some(item => item.name === name)).map(name => ({ name, on: true, image: '' }))],
+            });
+        } else {
+            toastr.info('没有识别到名字，请手动添加');
+            openTutuNameMaskEditor(state.text, state.characterName, updateTutuExportDialog);
+        }
+    }
+
+    updateTutuExportDialog();
+});
+
+$(document).on('click', '#tutu_export_dialog .tutu-export-mask-edit', function () {
+    const state = tutuExportDialogState;
+
+    if (!state) return;
+
+    $('#tutu_export_dialog .tutu-export-mask').prop('checked', true);
+    openTutuNameMaskEditor(state.text, state.characterName, updateTutuExportDialog);
+    updateTutuExportDialog();
+});
+
+$(document).on('click', '#tutu_export_dialog .tutu-export-go', async function () {
+    const modal = document.getElementById('tutu_export_dialog');
+    const state = tutuExportDialogState;
+
+    if (!modal || !state) return;
+
+    const format = modal.querySelector('input[name="tutu_export_format"]:checked')?.value || 'text';
+    const keepStyle = modal.querySelector('.tutu-export-keep-style')?.checked !== false;
+    const maskNames = modal.querySelector('.tutu-export-mask').checked;
+    const items = maskNames ? getTutuCheckedMaskItems(state.text) : [];
+
+    if (maskNames && !items.length) {
+        toastr.warning('勾选了屏蔽名字，但名单是空的：点「设置要屏蔽的名字」添加');
+        return;
+    }
+
+    if (!state.isHtml) {
+        tutuSettings.exportOptions = { format, keepStyle, maskNames };
+        persistTutuSettings();
+    }
+
+    const button = this;
+    button.disabled = true;
+
+    try {
+        await runTutuExport(state.text, state.characterName, { format, keepStyle, items });
+        closeTutuExportDialog();
+    } catch (error) {
+        console.error('[克制放映室] 导出失败：', error);
+        toastr.error(error?.message || '导出失败');
+    } finally {
+        if (button.isConnected) button.disabled = false;
+    }
+});
+
+/** 按导出面板的选择导出 */
+async function runTutuExport(text, characterName, { format, keepStyle, items }) {
+    const masked = maskTutuNameLabel(characterName, items);
+    // 角色名被屏蔽时，文件名用「已屏蔽」，不出现一串 ■
+    const name = masked === characterName ? characterName : '已屏蔽';
+
+    if (format === 'html') {
+        exportTutuMaskedHtmlFile(text, name, items);
+        return;
+    }
+
+    if (format === 'text') {
+        exportTutuTextFile(maskTutuNamesInText(text, items), name);
+        return;
+    }
+
+    if (format === 'quote') {
+        // 书摘编辑器是另一个弹窗，先关掉导出面板
+        closeTutuExportDialog();
+        openTutuQuoteEditor(maskTutuNamesInText(text, items), name);
+        return;
+    }
+
+    if (format === 'styled-html') {
+        const html = buildTutuStyledExportHtml(text, { keepStyle, items, forImage: false });
+        downloadTutuBlob(
+            new Blob([html], { type: 'text/html;charset=utf-8' }),
+            `${sanitizeTutuFilename(`克制放映室-${name}`)}.html`
+        );
+        toastr.success('网页已导出');
+        return;
+    }
+
+    toastr.info('正在生成长图……');
+    await exportTutuStyledPng(text, name, { keepStyle, items });
+}
+
+/** HTML 小剧场导出：屏蔽时静态文字先换掉，脚本后来生成的文字由注入脚本换掉 */
+function exportTutuMaskedHtmlFile(text, characterName, items) {
+    if (!items.length) {
+        exportTutuHtmlFile(text, characterName);
+        return;
+    }
+
+    const isDocument = /<html[\s>]|<!doctype/i.test(text);
+    let html;
+
+    try {
+        const doc = new DOMParser().parseFromString(text, 'text/html');
+
+        tutuMaskNamesInDom(doc.body, items, TUTU_NAME_MASK_CSS);
+
+        if (doc.title) doc.title = maskTutuNamesInText(doc.title, items);
+
+        html = isDocument
+            ? `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`
+            : `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>克制放映室 - ${escapeHtml(characterName)}</title>
+${doc.head.innerHTML}
+</head>
+<body>
+${doc.body.innerHTML}
+</body>
+</html>`;
+    } catch (error) {
+        html = text;
+    }
+
+    html = injectTutuNameMaskIntoHtml(html, items);
+
+    downloadTutuBlob(
+        new Blob([html], { type: 'text/html;charset=utf-8' }),
+        `${sanitizeTutuFilename(`克制放映室-${characterName}`)}.html`
+    );
+
+    toastr.success('HTML 文件已导出（名字已屏蔽）');
+}
+
+/**
+ * 导出用的 CSS：
+ * keepStyle 时用排版美化的字体、颜色、背景和气泡样式；否则白底黑字。
+ * assets：长图导出时换成内嵌的字体 / 背景（data URL）。
+ */
+function buildTutuExportCss(typo, { keepStyle, forImage, width, assets = {} }) {
+    const textColor = sanitizeTutuCssValue(typo.textColor);
+    const bgColor = sanitizeTutuCssValue(typo.bgColor);
+
+    // 只设了浅色文字、没设背景色时（多半是深色主题），给深色底，免得白底白字
+    const isLightText = /^#(?:[0-9a-f]{3}){1,2}$/i.test(textColor) && (() => {
+        const hex = textColor.length === 4
+            ? textColor.slice(1).split('').map(char => char + char).join('')
+            : textColor.slice(1);
+        const [r, g, b] = [0, 2, 4].map(i => parseInt(hex.slice(i, i + 2), 16));
+        return (0.299 * r + 0.587 * g + 0.114 * b) > 170;
+    })();
+    const pageBg = keepStyle ? (bgColor || (isLightText ? '#1f1f24' : '#ffffff')) : '#ffffff';
+
+    const outer = forImage
+        ? 'html, body { margin: 0; padding: 0; background: transparent; }'
+        : `html, body { margin: 0; padding: 0; }
+body { min-height: 100vh; padding: 24px 12px; box-sizing: border-box; background: #ececec; }
+@media (prefers-color-scheme: dark) { body { background: #111; } }`;
+
+    const pageBox = forImage
+        ? `width: ${width}px !important; max-width: none !important; margin: 0 !important;`
+        : `width: 100% !important; max-width: ${width}px !important; margin: 0 auto !important; border-radius: 12px; box-shadow: 0 6px 30px rgba(0,0,0,.12);`;
+
+    if (!keepStyle) {
+        return `${outer}
+.tutu-export-page {
+    ${pageBox}
+    box-sizing: border-box;
+    padding: 32px 28px;
+    background: #fff;
+    color: #222;
+    font-size: 16px;
+    line-height: 1.8;
+    font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    white-space: pre-wrap;
+    word-break: break-word;
+}`;
+    }
+
+    const font = getTutuTypographyFont(typo);
+    const fontFace = assets.fontFace !== undefined ? assets.fontFace : font.fontFace;
+    const declarations = buildTutuTypographyDeclarations(typo, font.family, true, true);
+    const bgImage = assets.bgImage !== undefined ? assets.bgImage : '';
+
+    return `${fontFace}
+${outer}
+.tutu-export-page {
+    ${declarations};
+    ${pageBox}
+    box-sizing: border-box !important;
+    padding: max(${typo.padding}px, 28px) max(${typo.paddingX}px, 24px) !important;
+    background-color: ${pageBg} !important;
+    ${textColor ? '' : 'color: #2b2b2b !important;'}
+    ${bgImage ? `background-image: ${bgImage} !important;` : ''}
+    white-space: normal !important;
+    word-break: break-word !important;
+}
+${buildTutuTypographyStructureCss(typo, '.tutu-export-page')}`.replace(/<\/style/gi, '<\\/style');
+}
+
+/**
+ * 带排版的导出文档。
+ * 名字在生成时直接从 DOM 里换掉，文件里不含原名字。
+ */
+function buildTutuStyledExportHtml(text, { keepStyle, items, forImage, assets }) {
+    const typo = getTutuTypographyState();
+    const width = typo.maxWidth > 0 ? Math.min(Math.max(typo.maxWidth, 360), 1200) : (forImage ? 720 : 760);
+    const css = buildTutuExportCss(typo, { keepStyle, forImage, width, assets });
+    const body = keepStyle ? formatTutuPlainHtml(text, typo) : escapeHtml(normalizeTutuPlainSource(text));
+
+    const doc = new DOMParser().parseFromString(
+        `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title></title><style id="tutu-export-css"></style></head>`
+        + `<body><div class="tutu-export-page${keepStyle ? ' tutu-typo-formatted' : ''}">${body}</div></body></html>`,
+        'text/html'
+    );
+
+    doc.getElementById('tutu-export-css').textContent = css;
+    doc.title = '克制放映室';
+
+    // 双击修正用的标记，导出文件里不需要
+    doc.querySelectorAll('[data-tutu-src], [data-tutu-line]').forEach(element => {
+        element.removeAttribute('data-tutu-src');
+        element.removeAttribute('data-tutu-line');
+    });
+
+    if (items.length) tutuMaskNamesInDom(doc.body, items, TUTU_NAME_MASK_CSS);
+
+    return `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`;
+}
+
+/** 远程资源转成 data URL（长图里不能引用外部文件） */
+async function fetchTutuAsDataUrl(url) {
+    const response = await fetch(url, { mode: 'cors' });
+
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+    const blob = await response.blob();
+
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(blob);
+    });
+}
+
+/** 长图要用的字体和背景图：能内嵌就内嵌，不能就退回默认并提示 */
+async function prepareTutuExportAssets(keepStyle) {
+    const assets = {};
+    const warnings = [];
+
+    if (!keepStyle) return { assets, warnings };
+
+    const typo = getTutuTypographyState();
+    const fontUrl = sanitizeTutuCssUrl(typo.fontUrl);
+
+    if (fontUrl) {
+        const { fontFace } = getTutuTypographyFont(typo);
+        const isFontFile = /\.(woff2?|ttf|otf)(\?|#|$)/i.test(fontUrl) || /^data:font\//i.test(fontUrl);
+
+        if (!isFontFile) {
+            assets.fontFace = '';
+            warnings.push('在线字体样式表无法放进图片，改用系统字体');
+        } else if (!/^data:/i.test(fontUrl)) {
+            try {
+                const data = await fetchTutuAsDataUrl(fontUrl);
+                assets.fontFace = fontFace.replace(`url("${fontUrl}")`, () => `url("${data}")`);
+            } catch (error) {
+                assets.fontFace = '';
+                warnings.push('字体链接不允许跨域读取，改用系统字体');
+            }
+        }
+    }
+
+    const bgUrl = sanitizeTutuCssUrl(typo.bgImage);
+
+    if (bgUrl) {
+        if (/^data:/i.test(bgUrl)) {
+            assets.bgImage = `url("${bgUrl}")`;
+        } else {
+            try {
+                assets.bgImage = `url("${await fetchTutuAsDataUrl(bgUrl)}")`;
+            } catch (error) {
+                assets.bgImage = 'none';
+                warnings.push('背景图片不允许跨域读取，长图里只保留背景色（导出网页可以保留背景图）');
+            }
+        }
+    }
+
+    return { assets, warnings };
+}
+
+/** 在看不见的 iframe 里排版，等字体和图片加载完 */
+function loadTutuExportFrame(html) {
+    return new Promise((resolve, reject) => {
+        const frame = document.createElement('iframe');
+
+        frame.setAttribute('aria-hidden', 'true');
+        frame.tabIndex = -1;
+        frame.style.cssText = 'position:fixed;left:-10000px;top:0;width:1400px;height:800px;border:0;opacity:0;pointer-events:none;';
+
+        const timer = setTimeout(() => {
+            frame.remove();
+            reject(new Error('排版超时'));
+        }, 15000);
+
+        frame.onload = async () => {
+            try {
+                const doc = frame.contentDocument;
+
+                await Promise.race([
+                    doc.fonts?.ready || Promise.resolve(),
+                    new Promise(done => setTimeout(done, 3000)),
+                ]);
+
+                await Promise.all([...doc.images].map(image => (
+                    image.complete ? null : new Promise(done => { image.onload = image.onerror = done; })
+                )));
+
+                clearTimeout(timer);
+                resolve(frame);
+            } catch (error) {
+                clearTimeout(timer);
+                frame.remove();
+                reject(error);
+            }
+        };
+
+        frame.srcdoc = html;
+        document.body.appendChild(frame);
+    });
+}
+
+/** 带排版的长图：DOM → SVG foreignObject → canvas → PNG */
+async function exportTutuStyledPng(text, characterName, { keepStyle, items }) {
+    const { assets, warnings } = await prepareTutuExportAssets(keepStyle);
+    const html = buildTutuStyledExportHtml(text, { keepStyle, items, forImage: true, assets });
+    const frame = await loadTutuExportFrame(html);
+
+    try {
+        const doc = frame.contentDocument;
+        const page = doc.querySelector('.tutu-export-page');
+        const width = Math.ceil(page.getBoundingClientRect().width);
+        const height = Math.ceil(page.getBoundingClientRect().height);
+
+        // 画布尺寸上限：边长 16384、面积约 1.6 亿像素
+        const scale = Math.min(2, 16000 / height, 16000 / width, Math.sqrt(160000000 / (width * height)));
+
+        if (scale < 0.5) throw new Error('内容太长，长图放不下：请改用「网页 HTML」导出');
+
+        const css = [...doc.querySelectorAll('style')].map(style => style.textContent).join('\n');
+        const markup = new XMLSerializer().serializeToString(page);
+        const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">`
+            + `<foreignObject x="0" y="0" width="100%" height="100%">`
+            + `<div xmlns="http://www.w3.org/1999/xhtml" style="width:${width}px;height:${height}px;">`
+            + `<style><![CDATA[${css.replace(/]]>/g, ']]]]><![CDATA[>')}]]></style>`
+            + markup
+            + '</div></foreignObject></svg>';
+
+        const image = new Image();
+        image.decoding = 'sync';
+
+        await new Promise((resolve, reject) => {
+            image.onload = resolve;
+            image.onerror = () => reject(new Error('长图渲染失败：可以改用「网页 HTML」导出'));
+            image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+        });
+
+        // 让图片里的字体有时间完成绘制
+        await new Promise(resolve => setTimeout(resolve, 120));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(width * scale);
+        canvas.height = Math.round(height * scale);
+
+        const context = canvas.getContext('2d');
+        context.scale(scale, scale);
+        context.drawImage(image, 0, 0, width, height);
+
+        const blob = await new Promise((resolve, reject) => {
+            try {
+                canvas.toBlob(result => (result ? resolve(result) : reject(new Error('图片生成失败'))), 'image/png');
+            } catch (error) {
+                reject(new Error('浏览器不允许把排版画成图片（常见于 Safari）：请改用「网页 HTML」导出'));
+            }
+        });
+
+        downloadTutuBlob(blob, `${sanitizeTutuFilename(`克制放映室-${characterName}`)}.png`);
+
+        warnings.forEach(message => toastr.warning(message));
+        toastr.success(items.length ? '长图已导出（名字已屏蔽）' : '长图已导出');
+    } finally {
+        frame.remove();
+    }
+}
 
 let tutuCurrentCharacterContext = {
     character: null,
@@ -13963,36 +15382,12 @@ $(document).on(
             return;
         }
 
-        const characterName =
-            favorite.characterName || 'AI';
-
-        if (favorite.type === 'html') {
-            exportTutuHtmlFile(
-                favorite.content,
-                characterName
-            );
-        } else {
-            const exportFormat =
-                $('#tutu_export_format').val() ||
-                'text';
-
-            if (exportFormat === 'text') {
-                exportTutuTextFile(
-                    favorite.content,
-                    characterName
-                );
-            } else {
-                const styleName =
-                    $('#tutu_export_style').val() ||
-                    'classic';
-
-                exportTutuQuoteImage(
-                    favorite.content,
-                    characterName,
-                    styleName
-                );
-            }
-        }
+        // 打开导出面板：可选格式、保留排版、屏蔽名字（默认跟随这条收藏的屏蔽状态）
+        exportTutuContent(
+            favorite.content,
+            favorite.characterName || 'AI',
+            { maskNames: getTutuActiveMaskItems(favorite.content).length > 0 }
+        );
     }
 );
 $(document).on(
@@ -14031,7 +15426,8 @@ $(document).on(
 
         openTutuTheaterFullscreen(
             content,
-            characterName
+            characterName,
+            { nameMask: true }
         );
     }
 );

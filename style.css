@@ -1959,6 +1959,274 @@
     }
 }
 
+/* ---- 屏蔽名字 ---- */
+.tutu-favorite-mask-btn.active {
+    color: var(--SmartThemeQuoteColor, #c96f4a);
+}
+
+.tutu-favorite-mask-bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    margin: 0 0 6px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    font-size: 0.78em;
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor, #c96f4a) 12%, transparent);
+}
+
+.tutu-favorite-mask-bar > span {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.tutu-favorite-mask-edit {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 28px;
+    padding: 2px 8px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--SmartThemeQuoteColor, #c96f4a);
+    font: inherit;
+    cursor: pointer;
+}
+
+.tutu-favorite-mask-edit:hover {
+    background: rgba(127, 127, 127, 0.15);
+}
+
+.tutu-favorite-mask-edit:focus-visible,
+.tutu-favorite-mask-btn:focus-visible {
+    outline: 2px solid var(--SmartThemeQuoteColor, #c96f4a);
+    outline-offset: 2px;
+}
+
+.tutu-name-mask-editor {
+    width: min(560px, 100%);
+}
+
+.tutu-name-mask-switch {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.9em;
+    cursor: pointer;
+}
+
+.tutu-name-mask-list {
+    gap: 6px;
+}
+
+.tutu-name-mask-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    padding: 6px 8px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+}
+
+.tutu-name-mask-row.off {
+    opacity: 0.55;
+}
+
+.tutu-name-mask-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    cursor: pointer;
+}
+
+.tutu-name-mask-name {
+    font-weight: 600;
+    word-break: break-all;
+}
+
+.tutu-name-mask-arrow {
+    opacity: 0.5;
+}
+
+.tutu-name-mask-preview {
+    display: inline-flex;
+    align-items: center;
+    min-height: 1.6em;
+}
+
+.tutu-name-mask-row-actions {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-left: auto;
+}
+
+.tutu-name-mask-row-actions .menu_button,
+.tutu-name-mask-add .menu_button {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 30px;
+    padding: 3px 8px;
+    font-size: 0.82em;
+}
+
+.tutu-name-mask-add {
+    display: flex;
+    gap: 6px;
+}
+
+.tutu-name-mask-add input {
+    flex: 1 1 auto;
+    min-width: 0;
+    margin: 0 !important;
+}
+
+/* ---- 导出面板 ---- */
+.tutu-export-dialog {
+    width: min(520px, 100%);
+    overflow-y: auto;
+}
+
+.tutu-export-section-label {
+    font-size: 0.8em;
+    opacity: 0.7;
+}
+
+.tutu-export-formats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+}
+
+.tutu-export-format {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 10px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.tutu-export-format input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.tutu-export-format > i {
+    margin-top: 3px;
+    opacity: 0.75;
+}
+
+.tutu-export-format.active {
+    border-color: var(--SmartThemeQuoteColor, #c96f4a);
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor, #c96f4a) 14%, transparent);
+}
+
+.tutu-export-format.active > i {
+    color: var(--SmartThemeQuoteColor, #c96f4a);
+    opacity: 1;
+}
+
+.tutu-export-format:has(input:focus-visible) {
+    outline: 2px solid var(--SmartThemeQuoteColor, #c96f4a);
+    outline-offset: 1px;
+}
+
+.tutu-export-format-text,
+.tutu-export-option > span {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.tutu-export-format-text small,
+.tutu-export-option small {
+    font-size: 0.75em;
+    opacity: 0.65;
+    line-height: 1.4;
+}
+
+.tutu-export-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 2px 0;
+    font-size: 0.9em;
+    cursor: pointer;
+}
+
+.tutu-export-option input {
+    margin-top: 3px;
+}
+
+.tutu-export-option.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.tutu-export-mask-edit {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    align-self: flex-start;
+    margin-left: 24px !important;
+    padding: 4px 10px;
+    font-size: 0.82em;
+}
+
+.tutu-export-foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    padding-top: 8px;
+    border-top: 1px solid var(--SmartThemeBorderColor);
+}
+
+.tutu-export-foot .menu_button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 14px;
+}
+
+.tutu-export-go {
+    border-color: var(--SmartThemeQuoteColor, #c96f4a) !important;
+    color: var(--SmartThemeQuoteColor, #c96f4a) !important;
+    font-weight: 600;
+}
+
+.tutu-export-go:disabled {
+    opacity: 0.5;
+    cursor: wait;
+}
+
+@media (max-width: 600px) {
+    .tutu-export-formats {
+        grid-template-columns: 1fr;
+    }
+
+    .tutu-name-mask-row-actions {
+        margin-left: 0;
+        width: 100%;
+    }
+
+    .tutu-name-mask-row-actions .menu_button span,
+    .tutu-export-foot .menu_button span {
+        display: inline;
+    }
+}
+
 /* 副 API 最大输出长度 */
 .tutu-max-tokens-row {
     display: flex;
