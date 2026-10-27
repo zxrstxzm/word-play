@@ -1548,6 +1548,67 @@
     flex-shrink: 0;
 }
 
+/* 生成格式：纯文本 / HTML */
+.tutu-format-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 6px;
+    font-size: 0.85em;
+}
+
+.tutu-format-label {
+    opacity: 0.7;
+}
+
+.tutu-format-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 28px;
+    padding: 3px 12px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 999px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    opacity: 0.75;
+    transition: background-color 0.15s, opacity 0.15s, border-color 0.15s;
+}
+
+.tutu-format-btn:hover {
+    opacity: 1;
+}
+
+.tutu-format-btn.active {
+    opacity: 1;
+    border-color: var(--SmartThemeQuoteColor, #c96f4a);
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor, #c96f4a) 18%, transparent);
+    font-weight: 600;
+}
+
+.tutu-format-btn:focus-visible {
+    outline: 2px solid var(--SmartThemeQuoteColor, #c96f4a);
+    outline-offset: 1px;
+}
+
+.tutu-format-hint {
+    opacity: 0.55;
+    font-size: 0.92em;
+}
+
+.tutu-html-prompt {
+    width: 100%;
+    min-height: 140px;
+    box-sizing: border-box;
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 0.82em;
+    line-height: 1.5;
+    resize: vertical;
+}
+
 /* 自动生成状态：只保留一个圆点 */
 #tutu_auto_status.tutu-auto-status {
     width: 34px;
@@ -4936,8 +4997,54 @@ details.tutu-captured-element > .tutu-capture-actions-bar {
 
 .tutu-aux-active-selects {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 10px;
+}
+
+/* 破限 / 文风 / 附加：多选复选框列表 */
+.tutu-aux-checklist {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-height: 180px;
+    overflow-y: auto;
+    padding: 6px 8px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    background: var(--black30a, rgba(0, 0, 0, 0.1));
+}
+
+.tutu-aux-check-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 0;
+    font-size: 0.92em;
+    cursor: pointer;
+    min-width: 0;
+}
+
+.tutu-aux-check-item input {
+    flex: 0 0 auto;
+    margin: 0;
+}
+
+.tutu-aux-check-item span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tutu-aux-checklist-empty {
+    font-size: 0.85em;
+    opacity: 0.6;
+    padding: 4px 0;
+}
+
+.tutu-aux-active-count {
+    font-weight: normal;
+    font-size: 0.85em;
+    opacity: 0.7;
 }
 
 .tutu-aux-active-item {

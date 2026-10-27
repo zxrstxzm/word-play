@@ -282,12 +282,14 @@ const AUX_PROMPTS_KEY =
 const AUX_PROMPT_TYPES = [
     'jailbreak',
     'style',
+    'extra',   // 附加：禁词、格式要求等，可多选
 ];
 
 let tutuAuxPrompts = normalizeTutuAuxPrompts(
     loadLocalJson(AUX_PROMPTS_KEY, {
         jailbreak: [],
         style: [],
+        extra: [],
     })
 );
 
@@ -295,6 +297,7 @@ function normalizeTutuAuxPrompts(data) {
     const result = {
         jailbreak: [],
         style: [],
+        extra: [],
     };
 
     AUX_PROMPT_TYPES.forEach(type => {
@@ -340,9 +343,49 @@ function createTutuAuxPromptId() {
 }
 
 function getTutuAuxPromptTypeLabel(type) {
-    return type === 'style'
-        ? '文风'
-        : '破限';
+    if (type === 'style') return '文风';
+    if (type === 'extra') return '附加';
+    return '破限';
+}
+
+/**
+ * 每类当前启用的提示词 id 列表（支持多选）。
+ * 兼容旧版单选字段 activeJailbreakPromptId / activeStylePromptId。
+ */
+function getTutuActiveAuxIds(type) {
+    if (!tutuSettings.activeAuxPromptIds || typeof tutuSettings.activeAuxPromptIds !== 'object') {
+        tutuSettings.activeAuxPromptIds = {};
+    }
+
+    const map = tutuSettings.activeAuxPromptIds;
+
+    if (!Array.isArray(map[type])) {
+        const legacy = type === 'jailbreak'
+            ? tutuSettings.activeJailbreakPromptId
+            : type === 'style'
+                ? tutuSettings.activeStylePromptId
+                : '';
+
+        map[type] = legacy ? [String(legacy)] : [];
+    }
+
+    return map[type];
+}
+
+function setTutuActiveAuxIds(type, ids) {
+    getTutuActiveAuxIds(type);
+    tutuSettings.activeAuxPromptIds[type] = [...new Set(ids.map(String).filter(Boolean))];
+
+    // 旧字段同步为第一项，兼容旧逻辑 / 降级
+    if (type === 'jailbreak') tutuSettings.activeJailbreakPromptId = tutuSettings.activeAuxPromptIds[type][0] || '';
+    if (type === 'style') tutuSettings.activeStylePromptId = tutuSettings.activeAuxPromptIds[type][0] || '';
+}
+
+/** 当前启用的某类提示词（按勾选顺序，过滤已删除的） */
+function getActiveTutuAuxPrompts(type) {
+    return getTutuActiveAuxIds(type)
+        .map(id => findTutuAuxPrompt(type, id))
+        .filter(Boolean);
 }
 
 function saveTutuAuxPromptRecord(
@@ -1393,6 +1436,11 @@ tutuSettings = {
     model: '',
     activeJailbreakPromptId: '',
     activeStylePromptId: '',
+    activeAuxPromptIds: null,   // { jailbreak: [], style: [], extra: [] }，null 时从旧字段迁移
+    // 生成格式：text 纯文本（自动适配排版） / html 交互网页
+    outputFormat: 'text',
+    // 自定义 HTML 生成要求，留空使用内置版本
+    htmlPromptCustom: '',
     auxPromptsEnabled: false,
     autoGenerateEnabled: false,
 
@@ -2318,7 +2366,132 @@ function parseTutuDialogueLine(line) {
 
     if (TUTU_NARRATIVE_SPEAKER.test(name) || /^\d+$/.test(name)) return null;
 
+    // 「欲宓皱眉：“……”」冒号后是引号 → 叙述 + 台词，交给叙述行处理
+    if (/^[“「『"]/.test(match[2].trim())) return null;
+
     return { name, text: match[2].trim() };
+}
+
+// ---------- 叙述里嵌着引号台词：欲宓……皱眉偏了偏头：“……” ----------
+
+/** 台词引号（不含单引号，单引号多用于强调） */
+const TUTU_SPEECH_QUOTE = /(“[^“”]*”|「[^「」]*」|『[^『』]*』|"[^"\n]*")/g;
+
+/** 代词说话人 */
+const TUTU_PRONOUN_SPEAKER = /^(他|她|它|我|你|您|他们|她们|我们|你们)/;
+
+/** 不能当名字开头的叙述词 */
+const TUTU_NAME_STOPWORDS = /^(这时|此时|然后|于是|接着|随后|忽然|突然|终于|最后|只是|但是|可是|不过|因为|所以|如果|虽然|那边|这边|一旁|旁边|门外|屋里|对面|身后|半晌|片刻|良久|许久|一会|下一秒|话音|声音)/;
+
+/** 名字里不该出现的字：说明截到了动作 */
+const TUTU_NAME_BAD_CHAR = /[他她它你我的了着被把将在是这那和与跟向对给让从又也都就还很不没]/;
+
+/**
+ * 判断引号里是不是台词：
+ * 太短（≤4 字）且前面不是冒号 / 后面不是「说 / 道」时，多半是强调词，不当台词。
+ */
+function isTutuSpeechQuote(quote, before, after) {
+    const inner = quote.slice(1, -1).trim();
+
+    if (!inner) return false;
+    if (/[:：，,]\s*$/.test(before)) return true;
+    if (/^\s*[，,]?\s*(他|她|它)?(说|道|问|答|喊|叫|笑道|骂道|低声|轻声)/.test(after)) return true;
+    if (!before.trim()) return true;     // 行首直接是引号
+    if (/[。！？!?…~～]$/.test(inner)) return true;
+
+    return Array.from(inner).length > 4;
+}
+
+/** 把一行拆成 [{ type:'narration'|'speech', text }] */
+function splitTutuSpeechSegments(line) {
+    const segments = [];
+    const text = String(line || '');
+    let last = 0;
+    let match;
+
+    TUTU_SPEECH_QUOTE.lastIndex = 0;
+
+    while ((match = TUTU_SPEECH_QUOTE.exec(text))) {
+        const before = text.slice(last, match.index);
+        const after = text.slice(match.index + match[0].length);
+
+        if (!isTutuSpeechQuote(match[0], text.slice(0, match.index), after)) continue;
+
+        if (before) segments.push({ type: 'narration', text: before });
+        segments.push({ type: 'speech', text: match[0].slice(1, -1).trim(), quote: match[0] });
+        last = match.index + match[0].length;
+    }
+
+    if (last < text.length) segments.push({ type: 'narration', text: text.slice(last) });
+
+    return segments;
+}
+
+/** 从叙述开头猜名字：取到第一个动作字 / 标点前，2–4 字 */
+function guessTutuSpeakerName(narration) {
+    const head = String(narration || '').replace(/^[\s\u3000]+/, '');
+
+    if (TUTU_NAME_STOPWORDS.test(head)) return '';
+
+    // 名字后面紧跟介词 / 副词 / 常见动作字，或标点
+    const match = head.match(/^([\u4e00-\u9fa5·]{2,4}?)(?=[被把将在对向跟和与给让从又也都就还刚才正已便却只再看抬低笑皱偏点摇说道问伸走转望拿握靠坐站叹轻冷挑眯垂咬撇勾揉听愣盯瞥]|[，,。：:！？\s])/);
+
+    if (!match) return '';
+
+    const name = match[1];
+
+    if (TUTU_NAME_BAD_CHAR.test(name) || TUTU_PRONOUN_SPEAKER.test(name)) return '';
+
+    return name;
+}
+
+/**
+ * 找说话人：
+ * 1. 叙述开头就是已知名字（角色 / 用户 / 「名字：」行出现过的）
+ * 2. 叙述开头是代词 → 用代词当颜色分组，不显示名字
+ * 3. 从叙述开头猜一个名字
+ */
+function findTutuSpeaker(narration, knownNames) {
+    const head = String(narration || '').replace(/^[\s\u3000]+/, '');
+
+    if (!head) return null;
+
+    const known = knownNames.find(name => head.startsWith(name));
+    if (known) return { name: known, key: known };
+
+    const pronoun = head.match(TUTU_PRONOUN_SPEAKER);
+    if (pronoun) return { name: '', key: `pronoun:${pronoun[1]}` };
+
+    // 叙述中间带已知名字 + 冒号（「……这时欲宓开口：」）
+    const tail = head.slice(-24);
+    const tailKnown = knownNames.find(name => tail.includes(name) && /[:：]\s*$/.test(head));
+    if (tailKnown) return { name: tailKnown, key: tailKnown };
+
+    const guessed = guessTutuSpeakerName(head);
+    if (guessed) return { name: guessed, key: guessed };
+
+    return null;
+}
+
+function collectTutuKnownSpeakerNames(tokens) {
+    const names = new Set();
+
+    try {
+        const ctx = SillyTavern.getContext();
+        [ctx?.name1, ctx?.name2].forEach(name => {
+            const value = String(name || '').trim();
+            if (value && value.length <= 12) names.add(value);
+        });
+    } catch (error) {
+        // 非酒馆环境忽略
+    }
+
+    tokens.forEach(token => {
+        if (token.type === 'dialogue') names.add(token.name);
+    });
+
+    // 长名字优先匹配
+    return [...names].sort((a, b) => b.length - a.length);
 }
 
 function classifyTutuPlainLine(line) {
@@ -2399,16 +2572,90 @@ function formatTutuPlainHtml(text, typo = getTutuTypographyState()) {
         return `<p class="${cls}">${content}</p>`;
     };
 
+    // ---------- 对话块：按说话人分配颜色 ----------
+    const knownNames = collectTutuKnownSpeakerNames(tokens);
+    const speakerColors = new Map();
+    const recentSpeakers = [];   // 最近两个不同的说话人，用于推断没写名字的台词
+
+    const getSpeakerColor = key => {
+        if (!speakerColors.has(key)) speakerColors.set(key, speakerColors.size % 6);
+        return speakerColors.get(key);
+    };
+
+    const rememberSpeaker = speaker => {
+        if (!speaker || speaker.key === 'unknown') return;
+        if (recentSpeakers[0]?.key === speaker.key) return;
+
+        recentSpeakers.unshift(speaker);
+        recentSpeakers.length = Math.min(recentSpeakers.length, 2);
+    };
+
+    /** 没有叙述的纯台词行：两人轮流说话时归给另一个人 */
+    const inferSpeaker = () => (
+        recentSpeakers.length === 2
+            ? recentSpeakers[1]
+            : { name: '', key: 'unknown' }
+    );
+
+    const buildDialogueBlock = (speaker, parts) => {
+        firstParagraphDone = true;
+
+        const color = getSpeakerColor(speaker.key);
+        const nameHtml = speaker.name
+            ? `<div class="tutu-dialogue-name">${escapeHtml(speaker.name)}</div>`
+            : '';
+
+        const body = parts.map(part => {
+            if (part.type === 'speech') {
+                return `<div class="tutu-dialogue-bubble">${escapeHtml(part.text)}</div>`;
+            }
+
+            // 叙述去掉开头重复的名字和结尾的冒号
+            let narration = part.text.replace(/^[\s\u3000]+/, '');
+            if (speaker.name && narration.startsWith(speaker.name) && part === parts[0]) {
+                narration = narration.slice(speaker.name.length);
+            }
+            narration = narration.replace(/[:：，,\s]+$/, '').replace(/^[，,\s]+/, '');
+
+            if (!narration || /^[。！？!?…~～、\s]+$/.test(narration)) return '';
+
+            return `<div class="tutu-dialogue-action">${formatTutuInlineText(narration, typo)}</div>`;
+        }).join('');
+
+        return `<div class="tutu-dialogue tutu-speaker-${color}">${nameHtml}${body}</div>`;
+    };
+
     const renderDialogue = token => {
         if (!typo.dialogueBlock) {
             return renderParagraph(`${token.name}：${token.text}`);
         }
 
-        firstParagraphDone = true;
-        return '<div class="tutu-dialogue">'
-            + `<div class="tutu-dialogue-name">${escapeHtml(token.name)}</div>`
-            + `<div class="tutu-dialogue-text">${formatTutuInlineText(token.text, typo)}</div>`
-            + '</div>';
+        const speaker = { name: token.name, key: token.name };
+        rememberSpeaker(speaker);
+
+        return buildDialogueBlock(speaker, [{ type: 'speech', text: token.text }]);
+    };
+
+    /** 普通叙述行：开启对话排版且含台词引号时，渲染成对话块 */
+    const renderTextLine = line => {
+        if (!typo.dialogueBlock) return renderParagraph(line);
+
+        const parts = splitTutuSpeechSegments(line);
+
+        if (!parts.some(part => part.type === 'speech')) return renderParagraph(line);
+
+        const firstNarration = parts[0].type === 'narration' ? parts[0].text : '';
+        const lastNarration = parts[parts.length - 1].type === 'narration'
+            ? parts[parts.length - 1].text
+            : '';
+
+        const speaker = findTutuSpeaker(firstNarration, knownNames)
+            || findTutuSpeaker(lastNarration.replace(/^[，,\s]+/, ''), knownNames)
+            || inferSpeaker();
+
+        rememberSpeaker(speaker);
+
+        return buildDialogueBlock(speaker, parts);
     };
 
     while (index < tokens.length) {
@@ -2444,7 +2691,7 @@ function formatTutuPlainHtml(text, typo = getTutuTypographyState()) {
         if (token.type === 'dialogue') {
             html.push(renderDialogue(token));
         } else if (token.type !== 'blank') {
-            html.push(renderParagraph(token.text));
+            html.push(token.type === 'text' ? renderTextLine(token.text) : renderParagraph(token.text));
         }
 
         index++;
@@ -2501,23 +2748,50 @@ ${s} .tutu-typo-first::first-letter {
 }` : ''}
 ${s} .tutu-typo-quote { color: ${quoteColor} !important; }
 
-${s} .tutu-dialogue { margin: 0 0 ${Math.max(typo.paragraphSpacing, 0.4)}em; }
+${s} .tutu-dialogue {
+    --tutu-sp: #c96f4a;
+    --tutu-sp-bg: rgba(201, 111, 74, 0.12);
+    margin: 0 0 ${Math.max(typo.paragraphSpacing, 0.9)}em;
+    text-indent: 0;
+}
+${s} .tutu-dialogue + .tutu-dialogue { margin-top: 0.3em; }
+${s} .tutu-speaker-1 { --tutu-sp: #4a8fc9; --tutu-sp-bg: rgba(74, 143, 201, 0.12); }
+${s} .tutu-speaker-2 { --tutu-sp: #5aa469; --tutu-sp-bg: rgba(90, 164, 105, 0.12); }
+${s} .tutu-speaker-3 { --tutu-sp: #a46ac9; --tutu-sp-bg: rgba(164, 106, 201, 0.12); }
+${s} .tutu-speaker-4 { --tutu-sp: #c9a24a; --tutu-sp-bg: rgba(201, 162, 74, 0.14); }
+${s} .tutu-speaker-5 { --tutu-sp: #c94a7a; --tutu-sp-bg: rgba(201, 74, 122, 0.12); }
 ${s} .tutu-dialogue-name {
     display: flex;
     align-items: center;
     gap: 0.5em;
     font-weight: 700;
     font-size: 0.92em;
-    opacity: 0.9;
+    color: var(--tutu-sp);
 }
 ${s} .tutu-dialogue-name::after {
     content: "";
     flex: 0 0 2.2em;
     height: 1px;
     background: currentColor;
-    opacity: 0.45;
+    opacity: 0.6;
 }
-${s} .tutu-dialogue-text { margin-top: 0.15em; }
+${s} .tutu-dialogue-action {
+    margin-top: 0.2em;
+    font-size: 0.92em;
+    opacity: 0.78;
+}
+${s} .tutu-dialogue-bubble {
+    width: fit-content;
+    max-width: 100%;
+    box-sizing: border-box;
+    margin-top: 0.35em;
+    padding: 0.4em 0.8em;
+    border-left: 3px solid var(--tutu-sp);
+    border-radius: 4px 10px 10px 4px;
+    background: var(--tutu-sp-bg);
+    word-break: break-word;
+}
+${s} .tutu-dialogue-bubble + .tutu-dialogue-bubble { margin-top: 0.5em; }
 
 ${s} .tutu-chat {
     display: flex;
@@ -3468,6 +3742,21 @@ localStorage.setItem(
             </div>
         </div>
 
+        <div class="tutu-format-row" role="radiogroup" aria-label="生成格式">
+            <span class="tutu-format-label">格式</span>
+            <button type="button" class="tutu-format-btn" data-format="text" role="radio" aria-checked="true"
+                title="纯文本：自动套用排版美化（段落、对话、微信气泡）">
+                <i class="fa-solid fa-align-left"></i>
+                纯文本
+            </button>
+            <button type="button" class="tutu-format-btn" data-format="html" role="radio" aria-checked="false"
+                title="HTML：生成可交互网页，同时适配手机和电脑">
+                <i class="fa-solid fa-code"></i>
+                HTML
+            </button>
+            <span id="tutu_format_hint" class="tutu-format-hint"></span>
+        </div>
+
     </div>
 
 
@@ -3953,6 +4242,10 @@ localStorage.setItem(
                 导入为文风
             </option>
 
+            <option value="extra">
+                导入为附加（禁词等）
+            </option>
+
             <option value="render_css">
                 导入为渲染 CSS
             </option>
@@ -4430,6 +4723,34 @@ localStorage.setItem(
         </div>
 
         <div class="tutu-settings-title">
+            <i class="fa-solid fa-code"></i>
+            HTML 生成要求
+        </div>
+
+        <div class="tutu-api-help">
+            生成区选「HTML」时发给 AI 的格式要求。内置版本已包含：单文件 HTML/CSS/JS、手机与电脑分别排版、
+            手机常见手势交互、图片合法来源且禁用真人、风格贴合设定、iframe 运行限制。
+            留空或点「恢复内置」即使用内置版本；用户当前设备会自动附在后面。
+        </div>
+
+        <textarea
+            id="tutu_html_prompt"
+            class="text_pole tutu-html-prompt"
+            rows="8"
+            placeholder="留空使用内置 HTML 生成要求"></textarea>
+
+        <div class="tutu-appearance-actions">
+            <button type="button" id="tutu_html_prompt_view_btn" class="menu_button">
+                <i class="fa-solid fa-eye"></i>
+                载入内置版本编辑
+            </button>
+            <button type="button" id="tutu_html_prompt_reset_btn" class="menu_button">
+                <i class="fa-solid fa-rotate-left"></i>
+                恢复内置
+            </button>
+        </div>
+
+        <div class="tutu-settings-title">
             <i class="fa-solid fa-robot"></i>
             小剧场生成 API
         </div>
@@ -4595,7 +4916,7 @@ localStorage.setItem(
 
     <div class="tutu-settings-title">
         <i class="fa-solid fa-feather-pointed"></i>
-        破限与文风
+        破限 / 文风 / 附加
     </div>
 
     <label class="tutu-switch-row tutu-aux-master-switch">
@@ -4604,7 +4925,7 @@ localStorage.setItem(
             id="tutu_aux_prompts_enabled">
 
         <span>
-            启用破限与文风提示词
+            启用破限、文风与附加提示词
         </span>
     </label>
 
@@ -4614,8 +4935,8 @@ localStorage.setItem(
         style="display:none;">
 
         <div class="tutu-api-help">
-            破限和文风都不是必选项，可以分别选择一个，
-            也可以选择“不使用”。
+            三类都可以多选，也可以都不选。生成时按勾选顺序拼进提示词；
+            「附加」适合放禁词、字数、格式等要求，可从预设里直接导入。
         </div>
 
         <div class="tutu-aux-active-selects">
@@ -4623,25 +4944,25 @@ localStorage.setItem(
             <div class="tutu-aux-active-item">
                 <label class="tutu-settings-label">
                     当前启用的破限
+                    <span class="tutu-aux-active-count" data-type="jailbreak"></span>
                 </label>
-
-                <select
-                    id="tutu_active_jailbreak_prompt"
-                    class="text_pole">
-                    <option value="">不使用破限</option>
-                </select>
+                <div class="tutu-aux-checklist" data-type="jailbreak"></div>
             </div>
 
             <div class="tutu-aux-active-item">
                 <label class="tutu-settings-label">
                     当前启用的文风
+                    <span class="tutu-aux-active-count" data-type="style"></span>
                 </label>
+                <div class="tutu-aux-checklist" data-type="style"></div>
+            </div>
 
-                <select
-                    id="tutu_active_style_prompt"
-                    class="text_pole">
-                    <option value="">不使用文风</option>
-                </select>
+            <div class="tutu-aux-active-item">
+                <label class="tutu-settings-label">
+                    当前启用的附加
+                    <span class="tutu-aux-active-count" data-type="extra"></span>
+                </label>
+                <div class="tutu-aux-checklist" data-type="extra"></div>
             </div>
 
         </div>
@@ -4653,7 +4974,7 @@ localStorage.setItem(
             <summary class="tutu-aux-editor-summary">
                 <span>
                     <i class="fa-solid fa-pen-to-square"></i>
-                    管理已保存的破限与文风
+                    管理已保存的破限 / 文风 / 附加
                 </span>
 
                 <i class="fa-solid fa-chevron-down tutu-aux-editor-arrow"></i>
@@ -4675,6 +4996,10 @@ localStorage.setItem(
 
                     <option value="style">
                         文风提示词
+                    </option>
+
+                    <option value="extra">
+                        附加提示词（禁词等）
                     </option>
                 </select>
 
@@ -4705,7 +5030,7 @@ localStorage.setItem(
                     id="tutu_aux_prompt_name"
                     class="text_pole"
                     type="text"
-                    placeholder="例如：通用破限、细腻文风">
+                    placeholder="例如：通用破限、细腻文风、禁词表">
 
                 <label class="tutu-settings-label">
                     提示词正文
@@ -4715,7 +5040,7 @@ localStorage.setItem(
                     id="tutu_aux_prompt_content"
                     class="text_pole tutu-aux-prompt-content"
                     rows="8"
-                    placeholder="请输入破限或文风提示词……"></textarea>
+                    placeholder="请输入破限、文风或附加提示词……"></textarea>
 
                 <div class="tutu-appearance-actions">
 
@@ -5189,8 +5514,24 @@ function isProbablyHtml(text) {
     return (
         /^<!doctype html/i.test(value) ||
         /^<html[\s>]/i.test(value) ||
-        /<(div|section|article|main|body|style|table|h1|h2|p|img|button|form)[\s>]/i.test(value)
+        /<(div|section|article|main|body|style|table|h1|h2|h3|p|img|button|form|script|svg|header|footer|nav|ul|ol)[\s>]/i.test(value)
     );
+}
+
+/**
+ * HTML 模式：去掉 AI 在文档前后加的说明文字，只保留 <!DOCTYPE html> … </html>。
+ * 找不到完整文档时原样返回。
+ */
+function extractTutuHtmlDocument(text) {
+    const value = String(text || '');
+    const start = value.search(/<!doctype html|<html[\s>]/i);
+
+    if (start < 0) return value.trim();
+
+    const endMatch = value.match(/<\/html\s*>(?![\s\S]*<\/html\s*>)/i);
+    const end = endMatch ? endMatch.index + endMatch[0].length : value.length;
+
+    return value.slice(start, end).trim();
 }
 function cleanGeneratedContent(content) {
     let text = String(content || '').trim();
@@ -7680,33 +8021,127 @@ function saveTutuWorldEntrySelection() {
         historyLimit: Number($('#tutu_history_limit').val()) || 20,
     });
 }
-function getActiveTutuJailbreakPrompt() {
-    const id =
-        String(
-            tutuSettings.activeJailbreakPromptId ||
-            ''
-        );
+/** 把某类启用的多条提示词拼成一段；多条时每条带名称小标题 */
+function joinTutuActiveAuxPromptText(type) {
+    const list = getActiveTutuAuxPrompts(type);
 
-    return findTutuAuxPrompt(
-        'jailbreak',
-        id
-    );
+    if (list.length <= 1) return list[0]?.content || '';
+
+    return list
+        .map(item => `〔${item.name}〕\n${item.content}`)
+        .join('\n\n');
 }
 
-function getActiveTutuStylePrompt() {
-    const id =
-        String(
-            tutuSettings.activeStylePromptId ||
-            ''
-        );
+// ==========================================
+// 生成格式：纯文本 / HTML
+// ==========================================
 
-    return findTutuAuxPrompt(
-        'style',
-        id
-    );
+/** 内置 HTML 生成要求（设置里可改，留空恢复这一版） */
+const TUTU_DEFAULT_HTML_PROMPT = `【输出格式：交互式 HTML 小剧场】
+把这段小剧场做成一个可直接运行的交互网页。剧情是核心，交互和视觉都为剧情服务。
+
+一、文件结构
+1. 只输出一个完整 HTML 文件：以 <!DOCTYPE html> 开头、</html> 结尾，前后不要有任何说明文字，不要用 \`\`\` 代码围栏。
+2. HTML + CSS + JavaScript 全部内联（<style> 和 <script> 写在文件里），不引用任何外部 JS / CSS 库、CDN 或外部字体，不发起任何网络请求（fetch、XHR、WebSocket 都不要）。
+3. <head> 里写 <meta charset="UTF-8"> 和 <meta name="viewport" content="width=device-width, initial-scale=1">。
+4. 字体只用系统字体栈：-apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif；需要衬线时用 "Songti SC", "SimSun", serif。
+5. 所有 class / id 加统一短前缀（如 tt-），避免和外部样式冲突；CSS 变量写在根容器上统一管理主题色。
+
+二、运行环境（必须遵守，否则会显示异常）
+1. 页面运行在一个高度自动撑开的 iframe 里：不要用 100vh / 100dvh / height:100% 撑满屏幕，不要把 html、body 设成固定高度或 overflow:hidden；内容自然向下排布。
+2. 弹窗、抽屉、底部面板用 position:absolute 定位在根容器内，不要用 position:fixed 铺满全屏。
+3. 无法使用 localStorage / sessionStorage / cookie（会报错），状态全部存在 JS 变量里；如果一定要尝试存储，必须用 try/catch 包住。
+4. 不要用 alert / confirm / prompt，用自己做的弹层代替。
+5. 脚本放在 </body> 前或用 DOMContentLoaded；整体用 try/catch 包住，出错时内容依然可读。
+
+三、手机端与电脑端（同一个文件同时适配，排版要有明显区别）
+1. 移动优先：默认按手机竖屏单列设计，宽度 100%，不出现横向滚动条；@media (min-width: 768px) 切换为电脑布局。
+2. 手机端：单列流式排版；正文 15–16px；按钮和可点击区域至少 44×44px；重要操作放在拇指容易点到的下方；用底部标签栏、底部抽屉、全宽卡片；左右留 12–16px 边距。
+3. 电脑端：内容最大宽度 720–960px 居中；可用双栏 / 侧边栏 / 多列卡片；正文 16–17px；提供 hover 效果、更细的视觉层次和键盘操作。
+4. 同时用 (hover: hover) 与 (pointer: coarse) 区分鼠标和触屏：触屏设备不要依赖 hover 才能看到的内容。
+5. 图片、SVG、表格、代码块都要 max-width:100%，长文本 word-break 防溢出；适配刘海屏 env(safe-area-inset-*)。
+
+四、交互（要丰富、有质感，至少 4 种，并贯穿剧情）
+手机端常见交互必须完善支持：
+- 点击 / 轻触：按钮、卡片翻转、展开收起、切换选项
+- 长按（约 500ms）：弹出隐藏内容、心声、菜单，附带轻微缩放反馈
+- 左右滑动：翻页、切换角色视角、滑动卡片；上下滑动：展开底部抽屉
+- 拖拽：拖动物品、拼图、排序、拉开遮挡
+- 双击：点赞 / 收藏 / 彩蛋
+- 涂抹 / 刮开、滑块解锁、进度条推进剧情
+电脑端：hover 预览、点击、拖拽、滚轮、键盘（← → 翻页，Esc 关闭弹层，Enter 确认）。
+实现要求：
+- 统一用 Pointer Events（pointerdown / pointermove / pointerup）同时兼容鼠标和触摸；需要滑动的区域设置 touch-action，避免和页面滚动冲突；按钮加 user-select:none 和 -webkit-tap-highlight-color:transparent。
+- 每次操作都有即时视觉反馈（按下态、过渡动画、状态变化），动画用 transform / opacity，时长 150–400ms。
+- 第一次出现的手势给出简短提示（如「长按查看」「左滑翻页」），不要让用户猜。
+- 推荐剧情交互：分支选项影响结局、好感度 / 心情数值、可解锁的隐藏对话或回忆、逐字显示的对话（可点击跳过）、手机界面模拟（聊天、朋友圈、相册、备忘录、来电）、日记翻页、信件拆封等，按情境挑合适的。
+- 支持 prefers-reduced-motion：用户偏好减少动画时关闭大幅动画。
+- 可点击元素用 <button> 或带 role / tabindex / aria-label，保证键盘可操作；文字与背景对比度足够。
+
+五、视觉风格
+1. 风格、配色、字体气质、装饰元素必须和角色设定、世界观、情境一致（古风用宣纸 / 墨色 / 印章；赛博用霓虹 / 网格；校园用便签 / 手写感等），不要套用千篇一律的模板。
+2. 层次清晰：标题、正文、旁白、对话、系统提示样式区分明显；对话可做成气泡或带名字的台词块，不同角色颜色区分。
+3. 适度使用渐变、阴影、圆角、纹理（CSS 实现），整体精致但不花哨，正文可读性优先。
+
+六、图片与素材
+1. 优先用 CSS、内联 SVG、emoji、Unicode 符号绘制图标、头像、插画和装饰，不依赖外部图片。
+2. 确实需要外部图片时：只能用你确定真实存在、可公开合法使用（CC0 / 免版权，或用户提供）的链接，内容只能是风景、物品、建筑、纹理、抽象图案或插画；必须写 alt，并加 onerror 隐藏或替换为 CSS 占位。
+3. 禁止使用真人照片、明星、网红或任何可识别的真实人物形象，禁止编造不确定的图片链接；人物形象一律用插画风 SVG、剪影或文字头像代替。
+4. 禁止嵌入音视频外链、iframe、表单提交到外部地址。
+
+七、内容与篇幅
+1. 剧情内容完整、有起承转合，文字量不少于纯文本版本；交互是增强体验，不能让剧情只剩按钮。
+2. 不需要交互也能读完主线；隐藏内容是加分项。
+3. 代码精简：避免重复样式和冗余脚本，总长度控制在合理范围，确保在输出上限内写完并闭合所有标签。`;
+
+/** 纯文本格式要求：配合排版美化自动识别 */
+function buildTutuTextFormatRules() {
+    const typo = getTutuTypographyState();
+    const rules = [
+        '【输出格式：纯文本小剧场】',
+        '1. 只输出纯文字，不要使用任何 HTML 标签、Markdown 标记（#、**、- 列表、```）或代码。',
+        '2. 每个段落单独一行，段落之间空一行；不要在段首手动加空格缩进。',
+        '3. 人物说的话用中文双引号“”包裹，可以写成「名字 + 动作：“台词”」，例如：林夏抬眼看他：“你又迟到了。”',
+    ];
+
+    if (typo.chatBubble) {
+        rules.push('4. 如果情节里出现微信 / 短信 / 聊天记录，聊天内容每条单独一行写成「名字：消息内容」，可以在消息前单独一行写时间（如 22:10），图片、语音、转账用 [图片] [语音] [转账] 表示；聊天前用一句叙述交代是在微信或聊天软件里。');
+    }
+
+    return rules.join('\n');
 }
 
-function buildTutuContextPrompt(userScenario) {
+function getTutuOutputFormat() {
+    return tutuSettings.outputFormat === 'html' ? 'html' : 'text';
+}
+
+function getTutuHtmlPrompt() {
+    return String(tutuSettings.htmlPromptCustom || '').trim() || TUTU_DEFAULT_HTML_PROMPT;
+}
+
+/** 告诉 AI 用户当前设备，便于把主要体验做在对应端 */
+function getTutuDeviceHint() {
+    try {
+        const coarse = window.matchMedia?.('(pointer: coarse)')?.matches;
+        const width = window.innerWidth || 0;
+
+        return coarse || width < 768
+            ? `当前用户正在使用手机 / 触屏设备浏览（屏幕宽度约 ${width}px），请把手机端体验作为重点，同时保留电脑端适配。`
+            : `当前用户正在使用电脑浏览（窗口宽度约 ${width}px），请把电脑端体验作为重点，同时保留手机端适配。`;
+    } catch (error) {
+        return '';
+    }
+}
+
+function buildTutuFormatRules(format = getTutuOutputFormat()) {
+    if (format !== 'html') return buildTutuTextFormatRules();
+
+    const hint = getTutuDeviceHint();
+
+    return `${getTutuHtmlPrompt()}${hint ? `\n\n【使用端】\n${hint}` : ''}`;
+}
+
+function buildTutuContextPrompt(userScenario, format = getTutuOutputFormat()) {
     const characterName =
         tutuCurrentCharacterContext.characterName || 'AI';
 
@@ -7733,21 +8168,14 @@ function buildTutuContextPrompt(userScenario) {
 const auxPromptsEnabled =
     Boolean(tutuSettings.auxPromptsEnabled);
 
-const jailbreakPrompt =
-    auxPromptsEnabled
-        ? getActiveTutuJailbreakPrompt()
-        : null;
-
-const stylePrompt =
-    auxPromptsEnabled
-        ? getActiveTutuStylePrompt()
-        : null;
-
 const jailbreakText =
-    jailbreakPrompt?.content || '';
+    auxPromptsEnabled ? joinTutuActiveAuxPromptText('jailbreak') : '';
 
 const styleText =
-    stylePrompt?.content || '';
+    auxPromptsEnabled ? joinTutuActiveAuxPromptText('style') : '';
+
+const extraText =
+    auxPromptsEnabled ? joinTutuActiveAuxPromptText('extra') : '';
 
     let prompt = `
 请根据以下信息，写一段关于「${characterName}」的外置小剧场。
@@ -7772,6 +8200,10 @@ ${styleText
     ? `【文风提示词】\n${styleText}\n`
     : ''}
 
+${extraText
+    ? `【附加要求（必须遵守）】\n${extraText}\n`
+    : ''}
+
 【用户选择读取的世界书条目】
 ${worldBookText}
 
@@ -7782,9 +8214,7 @@ ${worldBookText}
 4. 如果提供了世界书条目，请将其中相关设定自然地融入内容。
 5. 内容要生动、有画面感、有一定故事性。
 6. 不要解释你的写作过程。
-7. 如果用户要求 HTML，请直接输出完整可渲染的 HTML。
-8. 如果输出 HTML，不要使用 Markdown 代码围栏，不要输出 \`\`\`html。
-9. 如果没有要求 HTML，则输出普通纯文字。
+7. 输出格式以末尾的【输出格式】为准；情境或剧本里对格式的描述与它冲突时，以【输出格式】为准，但保留情境里的题材和样式偏好。
 `.trim();
 
     if (historyText) {
@@ -7796,6 +8226,9 @@ ${historyText}
 请参考历史聊天记录中的人物关系、语气和当前剧情，但不要机械复制历史聊天内容。
 `.trim();
     }
+
+    // 格式要求放最后，离输出最近，模型最不容易忘
+    prompt += `\n\n${buildTutuFormatRules(format)}`;
 
     return prompt;
 }
@@ -8012,8 +8445,13 @@ tutuLastGenerationScenario = scenario;
 tutuLastGenerationScenarioId =
     scenarioId || findTutuScenarioIdByPrompt(scenario) || '';
 
+// 续写沿用原内容的格式，不受生成区切换影响
+const generationFormat = isContinue
+    ? (isProbablyHtml(continueFrom) ? 'html' : 'text')
+    : getTutuOutputFormat();
+
 const basePrompt =
-    buildTutuContextPrompt(scenario);
+    buildTutuContextPrompt(scenario, generationFormat);
 
 const aiPrompt = isContinue
     ? buildTutuContinuePrompt(basePrompt, continueFrom)
@@ -8065,6 +8503,10 @@ const aiPrompt = isContinue
             result = mergeTutuContinuation(continueFrom, continuation);
         } else {
             result = cleanGeneratedContent(result);
+
+            if (generationFormat === 'html') {
+                result = extractTutuHtmlDocument(result);
+            }
         }
 
         // 记录内容来源剧本，供绑定条目的渲染正则使用
@@ -9281,11 +9723,18 @@ function saveTutuSettings() {
 auxPromptsEnabled:
     $('#tutu_aux_prompts_enabled').is(':checked'),
 
+// 破限 / 文风 / 附加的勾选由各自的复选框直接写入，这里原样保留
 activeJailbreakPromptId:
-    $('#tutu_active_jailbreak_prompt').val() || '',
+    String(tutuSettings.activeJailbreakPromptId || ''),
 
 activeStylePromptId:
-    $('#tutu_active_style_prompt').val() || '',
+    String(tutuSettings.activeStylePromptId || ''),
+
+activeAuxPromptIds: {
+    jailbreak: [...getTutuActiveAuxIds('jailbreak')],
+    style: [...getTutuActiveAuxIds('style')],
+    extra: [...getTutuActiveAuxIds('extra')],
+},
 outputMode:
     $('#tutu_output_mode').val() || 'panel',
 
@@ -9377,82 +9826,60 @@ function renderTutuAuxPromptPresetSelect() {
     }
 }
 
+function updateTutuAuxActiveCount(type) {
+    const count = getActiveTutuAuxPrompts(type).length;
+
+    $(`.tutu-aux-active-count[data-type="${type}"]`)
+        .text(count ? `（已选 ${count}）` : '（未使用）');
+}
+
+/** 三类提示词渲染成复选框列表，可多选 */
 function renderTutuActiveAuxPromptSelects() {
-    const $jailbreak =
-        $('#tutu_active_jailbreak_prompt');
+    AUX_PROMPT_TYPES.forEach(type => {
+        const $list = $(`.tutu-aux-checklist[data-type="${type}"]`);
 
-    const $style =
-        $('#tutu_active_style_prompt');
+        if (!$list.length) return;
 
-    if ($jailbreak.length) {
-        $jailbreak.empty().append(
-            $('<option>', {
-                value: '',
-                text: '不使用破限',
-            })
-        );
+        const items = tutuAuxPrompts[type] || [];
 
-        tutuAuxPrompts.jailbreak.forEach(item => {
-            $jailbreak.append(
-                $('<option>', {
-                    value: item.id,
-                    text: item.name,
+        // 清掉已删除的 id
+        const validIds = getTutuActiveAuxIds(type)
+            .filter(id => items.some(item => item.id === id));
+        setTutuActiveAuxIds(type, validIds);
+
+        $list.empty();
+
+        if (!items.length) {
+            $list.append(
+                $('<div>', {
+                    class: 'tutu-aux-checklist-empty',
+                    text: `还没有${getTutuAuxPromptTypeLabel(type)}提示词，可在下方新建或从预设导入`,
                 })
             );
-        });
-
-        const activeId =
-            String(
-                tutuSettings.activeJailbreakPromptId ||
-                ''
-            );
-
-        if (
-            tutuAuxPrompts.jailbreak.some(
-                item => item.id === activeId
-            )
-        ) {
-            $jailbreak.val(activeId);
-        } else {
-            $jailbreak.val('');
-            tutuSettings.activeJailbreakPromptId = '';
         }
-    }
 
-    if ($style.length) {
-        $style.empty().append(
-            $('<option>', {
-                value: '',
-                text: '不使用文风',
+        items.forEach(item => {
+            const $label = $('<label>', {
+                class: 'tutu-aux-check-item',
+                title: item.content.slice(0, 300),
+            });
+
+            $('<input>', {
+                type: 'checkbox',
+                class: 'tutu-aux-active-checkbox',
+                'data-type': type,
+                value: item.id,
             })
-        );
+                .prop('checked', validIds.includes(item.id))
+                .appendTo($label);
 
-        tutuAuxPrompts.style.forEach(item => {
-            $style.append(
-                $('<option>', {
-                    value: item.id,
-                    text: item.name,
-                })
-            );
+            $('<span>', { text: item.name }).appendTo($label);
+
+            $list.append($label);
         });
 
-        const activeId =
-            String(
-                tutuSettings.activeStylePromptId ||
-                ''
-            );
-
-        if (
-            tutuAuxPrompts.style.some(
-                item => item.id === activeId
-            )
-        ) {
-            $style.val(activeId);
-        } else {
-            $style.val('');
-            tutuSettings.activeStylePromptId = '';
-        }
-    }
+        updateTutuAuxActiveCount(type);
+    });
 }
 function updateTutuAuxPromptVisibility() {
     const enabled =
@@ -11525,8 +11952,8 @@ catch (error) {
 
         toastr.info(
             tutuSettings.auxPromptsEnabled
-                ? '已启用破限与文风提示词'
-                : '已停用破限与文风提示词'
+                ? '已启用破限 / 文风 / 附加提示词'
+                : '已停用破限 / 文风 / 附加提示词'
         );
     }
 );
@@ -11775,19 +12202,10 @@ $(document).on(
             id
         );
 
-        if (
-            type === 'jailbreak' &&
-            tutuSettings.activeJailbreakPromptId === id
-        ) {
-            tutuSettings.activeJailbreakPromptId = '';
-        }
-
-        if (
-            type === 'style' &&
-            tutuSettings.activeStylePromptId === id
-        ) {
-            tutuSettings.activeStylePromptId = '';
-        }
+        setTutuActiveAuxIds(
+            type,
+            getTutuActiveAuxIds(type).filter(item => item !== id)
+        );
 
         localStorage.setItem(
             SETTINGS_KEY,
@@ -11803,26 +12221,26 @@ $(document).on(
 
 $(document).on(
     'change',
-    '#tutu_active_jailbreak_prompt, #tutu_active_style_prompt',
+    '.tutu-aux-active-checkbox',
     function () {
-        tutuSettings.activeJailbreakPromptId =
-            String(
-                $('#tutu_active_jailbreak_prompt').val() ||
-                ''
-            );
+        const type = String($(this).attr('data-type') || '');
 
-        tutuSettings.activeStylePromptId =
-            String(
-                $('#tutu_active_style_prompt').val() ||
-                ''
-            );
+        if (!AUX_PROMPT_TYPES.includes(type)) return;
+
+        const id = String($(this).val() || '');
+        const ids = getTutuActiveAuxIds(type).filter(item => item !== id);
+
+        // 新勾选的追加到末尾，保持勾选顺序
+        if ($(this).is(':checked')) ids.push(id);
+
+        setTutuActiveAuxIds(type, ids);
 
         localStorage.setItem(
             SETTINGS_KEY,
             JSON.stringify(tutuSettings)
         );
 
-        toastr.success('破限与文风设置已更新');
+        updateTutuAuxActiveCount(type);
     }
 );
     $(document).on('click', '#tutu_export_styles_btn', exportTutuStyles);
@@ -13140,6 +13558,7 @@ function saveTutuTypographyFromUI() {
     };
 
     persistTutuSettings();
+    loadTutuOutputFormatToUI();
 
     // 页面内纯文本立即生效
     applyTutuTypographyStyle();
@@ -13187,6 +13606,62 @@ function renderTutuTypographyPresetOptions(selectedName = '') {
 
     $select.val(selectedName);
 }
+
+// ---------- 生成格式：纯文本 / HTML ----------
+function loadTutuOutputFormatToUI() {
+    const format = getTutuOutputFormat();
+
+    $('.tutu-format-btn').each(function () {
+        const active = $(this).attr('data-format') === format;
+
+        $(this)
+            .toggleClass('active', active)
+            .attr('aria-checked', active ? 'true' : 'false');
+    });
+
+    $('#tutu_format_hint').text(
+        format === 'html'
+            ? '交互网页 · 手机 / 电脑双端适配'
+            : (getTutuTypographyState().enabled ? '自动套用排版美化' : '排版美化未启用')
+    );
+
+    $('#tutu_html_prompt').val(String(tutuSettings.htmlPromptCustom || ''));
+}
+
+$(document).on('click', '.tutu-format-btn', function () {
+    const format = $(this).attr('data-format') === 'html' ? 'html' : 'text';
+
+    if (tutuSettings.outputFormat === format) return;
+
+    tutuSettings.outputFormat = format;
+    persistTutuSettings();
+    loadTutuOutputFormatToUI();
+});
+
+$(document).on('input change', '#tutu_html_prompt', function () {
+    const value = String($(this).val() || '');
+
+    // 和内置版本一字不差时按留空保存，以后内置版本升级能自动跟上
+    tutuSettings.htmlPromptCustom = value.trim() === TUTU_DEFAULT_HTML_PROMPT.trim() ? '' : value;
+    persistTutuSettings();
+});
+
+$(document).on('click', '#tutu_html_prompt_view_btn', function () {
+    const current = String($('#tutu_html_prompt').val() || '').trim();
+
+    if (current && !window.confirm('用内置版本覆盖输入框里的内容？')) return;
+
+    $('#tutu_html_prompt').val(TUTU_DEFAULT_HTML_PROMPT);
+    tutuSettings.htmlPromptCustom = '';
+    persistTutuSettings();
+});
+
+$(document).on('click', '#tutu_html_prompt_reset_btn', function () {
+    $('#tutu_html_prompt').val('');
+    tutuSettings.htmlPromptCustom = '';
+    persistTutuSettings();
+    toastr.success('已恢复内置 HTML 生成要求');
+});
 
 function applyTutuTypographyAll() {
     persistTutuSettings();
@@ -13516,6 +13991,7 @@ $(document).on('click', '#tutu_render_css_add_btn', function () {
 loadTutuSettingsToUI();
 loadTutuTypographyToUI();
 applyTutuTypographyStyle();
+loadTutuOutputFormatToUI();
 
 // 读取历史聊天记录：先显示上次的全局默认，切到具体角色后再按角色刷新
 $('#tutu_include_history').prop('checked', Boolean(tutuSettings.historyIncludeEnabled));
@@ -13869,6 +14345,7 @@ if (
 }
         let importedCount = 0;
         let firstImportedId = '';
+        const importedAuxIds = [];
 
         checkedBoxes.each(function () {
             const index =
@@ -13927,10 +14404,7 @@ if (importTarget === 'scenario') {
             /*
              * 导入为破限或文风
              */
-            if (
-                importTarget === 'jailbreak' ||
-                importTarget === 'style'
-            ) {
+            if (AUX_PROMPT_TYPES.includes(importTarget)) {
                 const record =
                     saveTutuAuxPromptRecord(
                         importTarget,
@@ -13942,6 +14416,7 @@ if (importTarget === 'scenario') {
                     firstImportedId = record.id;
                 }
 
+                importedAuxIds.push(record.id);
                 importedCount++;
             }
         });
@@ -13980,22 +14455,13 @@ if (importTarget === 'scenario') {
         }
 
         /*
-         * 导入提示词后，第一个自动设为当前启用项。
+         * 导入提示词后，本次导入的条目全部勾选为启用（追加到已勾选的后面）。
          */
-        if (
-            importTarget === 'jailbreak' &&
-            firstImportedId
-        ) {
-            tutuSettings.activeJailbreakPromptId =
-                firstImportedId;
-        }
-
-        if (
-            importTarget === 'style' &&
-            firstImportedId
-        ) {
-            tutuSettings.activeStylePromptId =
-                firstImportedId;
+        if (AUX_PROMPT_TYPES.includes(importTarget) && importedAuxIds.length) {
+            setTutuActiveAuxIds(importTarget, [
+                ...getTutuActiveAuxIds(importTarget),
+                ...importedAuxIds,
+            ]);
         }
 
         localStorage.setItem(
