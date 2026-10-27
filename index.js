@@ -2157,7 +2157,7 @@ function getDefaultTutuTypography() {
         quoteColor: '#c96f4a',
         dropCap: false,         // 首字放大
         chatBubble: true,       // 微信聊天自动渲染成气泡
-        dialogueBlock: false,   // 对话改成「名字 —— / 换行台词」
+        dialogueBlock: false,   // 对话改成「名字 ▌ / 换行台词」
     };
 }
 
@@ -2347,20 +2347,117 @@ function getTutuCharNameForChat() {
     }
 }
 
-/** 转义 + 可选引号高亮 */
-function formatTutuInlineText(text, typo) {
+/**
+ * 转义 + 引号处理：
+ * - emph 为真（开了对话排版）：叙述里的引号是强调，用「强调标签」样式，和台词气泡区分
+ * - 否则开了引号高亮时只改颜色
+ */
+function formatTutuInlineText(text, typo, emph = false) {
     const raw = String(text || '');
 
-    if (!typo.quoteHighlight) return escapeHtml(raw);
+    if (!emph && !typo.quoteHighlight) return escapeHtml(raw);
 
     return raw
         .split(TUTU_QUOTE_PATTERN)
-        .map((part, index) => (
-            index % 2 === 1
-                ? `<span class="tutu-typo-quote">${escapeHtml(part)}</span>`
-                : escapeHtml(part)
-        ))
+        .map((part, index) => {
+            if (index % 2 === 0) return escapeHtml(part);
+
+            if (emph) {
+                const open = escapeHtml(part.charAt(0));
+                const close = escapeHtml(part.slice(-1));
+                const inner = escapeHtml(part.slice(1, -1));
+
+                return `<span class="tutu-emph"><span class="tutu-emph-mark">${open}</span>${inner}<span class="tutu-emph-mark">${close}</span></span>`;
+            }
+
+            return `<span class="tutu-typo-quote">${escapeHtml(part)}</span>`;
+        })
         .join('');
+}
+
+// ==========================================
+// 对话气泡手动修正：按内容保存每一行的说话人 / 样式
+// ==========================================
+
+const TUTU_DIALOGUE_OVERRIDES_KEY = 'tutu_theater_dialogue_overrides';
+const TUTU_DIALOGUE_OVERRIDES_LIMIT = 200;
+
+/** 行样式：speech 台词气泡 / emph 强调（不是台词） / plain 普通段落 */
+const TUTU_LINE_MODES = ['speech', 'emph', 'plain'];
+
+/** 内容指纹（FNV-1a），同一段文字在面板、楼层、收藏里都能对上 */
+function hashTutuText(text) {
+    const value = String(text || '').replace(/\r\n?/g, '\n').trim();
+    let hash = 0x811c9dc5;
+
+    for (let i = 0; i < value.length; i++) {
+        hash ^= value.charCodeAt(i);
+        hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+
+    return `${hash.toString(36)}_${value.length.toString(36)}`;
+}
+
+let tutuDialogueOverrides = (() => {
+    try {
+        const data = JSON.parse(localStorage.getItem(TUTU_DIALOGUE_OVERRIDES_KEY) || '{}');
+        return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+    } catch (error) {
+        return {};
+    }
+})();
+
+/** 清洗单行修正：只留合法的 mode 和 1–12 字的名字 */
+function sanitizeTutuLineOverride(value) {
+    if (!value || typeof value !== 'object') return null;
+
+    const result = {};
+
+    if (TUTU_LINE_MODES.includes(value.mode)) result.mode = value.mode;
+
+    const name = String(value.name || '').replace(/[\r\n<>]/g, '').trim().slice(0, 12);
+    if (name) result.name = name;
+
+    return Object.keys(result).length ? result : null;
+}
+
+/** 读取某段内容的修正：{ 行号: { mode, name } } */
+function getTutuDialogueOverrides(text) {
+    const entry = tutuDialogueOverrides[hashTutuText(text)];
+
+    return entry && entry.lines && typeof entry.lines === 'object' ? entry.lines : {};
+}
+
+function saveTutuDialogueOverrides(text, lines) {
+    const key = hashTutuText(text);
+    const clean = {};
+
+    Object.entries(lines || {}).forEach(([index, value]) => {
+        const item = sanitizeTutuLineOverride(value);
+        if (item && /^\d+$/.test(index)) clean[index] = item;
+    });
+
+    if (Object.keys(clean).length) {
+        tutuDialogueOverrides[key] = { lines: clean, updatedAt: Date.now() };
+    } else {
+        delete tutuDialogueOverrides[key];
+    }
+
+    // 超出上限时删掉最久没改的
+    const keys = Object.keys(tutuDialogueOverrides);
+
+    if (keys.length > TUTU_DIALOGUE_OVERRIDES_LIMIT) {
+        keys
+            .sort((a, b) => (tutuDialogueOverrides[a]?.updatedAt || 0) - (tutuDialogueOverrides[b]?.updatedAt || 0))
+            .slice(0, keys.length - TUTU_DIALOGUE_OVERRIDES_LIMIT)
+            .forEach(item => delete tutuDialogueOverrides[item]);
+    }
+
+    try {
+        localStorage.setItem(TUTU_DIALOGUE_OVERRIDES_KEY, JSON.stringify(tutuDialogueOverrides));
+    } catch (error) {
+        console.warn('[克制放映室] 保存气泡修正失败：', error);
+    }
 }
 
 function parseTutuDialogueLine(line) {
@@ -2500,16 +2597,37 @@ function collectTutuKnownSpeakerNames(tokens) {
     return [...names].sort((a, b) => b.length - a.length);
 }
 
-function classifyTutuPlainLine(line) {
+/**
+ * 行分类。override 是手动修正：
+ * - mode=emph / plain：不再当成「名字：台词」，按普通行处理
+ * - name：替换识别出的说话人
+ */
+function classifyTutuPlainLine(line, override = null) {
     if (!String(line).trim()) return { type: 'blank' };
+
+    const mode = override?.mode || '';
+    const forcedName = override?.name || '';
+
+    if (mode === 'emph' || mode === 'plain') {
+        return { type: 'text', text: line, mode, forcedName };
+    }
+
     if (TUTU_TIME_LINE.test(line)) return { type: 'time', text: line.trim() };
 
     const dialogue = parseTutuDialogueLine(line);
-    if (dialogue) return { type: 'dialogue', ...dialogue };
+    if (dialogue) {
+        return {
+            type: 'dialogue',
+            ...dialogue,
+            name: forcedName || dialogue.name,
+            originalName: dialogue.name,
+            mode,
+        };
+    }
 
     if (TUTU_SYSTEM_LINE.test(line)) return { type: 'system', text: line.trim() };
 
-    return { type: 'text', text: line };
+    return { type: 'text', text: line, mode, forcedName };
 }
 
 /**
@@ -2532,21 +2650,22 @@ function pickTutuChatSelf(speakers) {
     return '';
 }
 
-function renderTutuChatRun(tokens, typo) {
+function renderTutuChatRun(tokens, typo, markLines = false) {
     const speakers = [...new Set(
         tokens.filter(token => token.type === 'dialogue').map(token => token.name)
     )];
     const self = pickTutuChatSelf(speakers);
+    const attr = token => (markLines && Number.isInteger(token.line) ? ` data-tutu-line="${token.line}"` : '');
 
     const rows = tokens.map(token => {
         if (token.type === 'time' || token.type === 'system') {
-            return `<div class="tutu-chat-tip">${escapeHtml(token.text.replace(/^[\[【（(]|[\]】）)]$/g, ''))}</div>`;
+            return `<div class="tutu-chat-tip"${attr(token)}>${escapeHtml(token.text.replace(/^[\[【（(]|[\]】）)]$/g, ''))}</div>`;
         }
 
         const isSelf = token.name === self;
         const avatar = escapeHtml(Array.from(token.name)[0] || '?');
 
-        return `<div class="tutu-chat-row${isSelf ? ' self' : ''}">`
+        return `<div class="tutu-chat-row${isSelf ? ' self' : ''}"${attr(token)}>`
             + `<div class="tutu-chat-avatar" aria-hidden="true">${avatar}</div>`
             + '<div class="tutu-chat-main">'
             + `<div class="tutu-chat-name">${escapeHtml(token.name)}</div>`
@@ -2561,21 +2680,35 @@ function renderTutuChatRun(tokens, typo) {
  * 纯文本 → 结构化 HTML（全部转义，安全）：
  * - 每个非空行一个段落，第一个段落可首字放大
  * - 连续的「名字：台词」+ 时间 / 系统提示，且有聊天信号时 → 微信气泡
- * - 其余对话行在开启对话块时 → 名字 —— / 换行台词
+ * - 其余对话行在开启对话块时 → 名字 ▌ / 换行台词
  */
-function formatTutuPlainHtml(text, typo = getTutuTypographyState()) {
+/**
+ * options.overrides：手动修正 { 行号: { mode, name } }，不传时按内容指纹读取已保存的修正
+ * options.markLines：给每个块加 data-tutu-line（编辑器预览用）
+ */
+function formatTutuPlainHtml(text, typo = getTutuTypographyState(), options = {}) {
     const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
-    const tokens = lines.map(classifyTutuPlainLine);
+    const overrides = options.overrides || getTutuDialogueOverrides(text);
+    const markLines = Boolean(options.markLines);
+    const tokens = lines.map((line, lineIndex) => ({
+        ...classifyTutuPlainLine(line, overrides[lineIndex] || null),
+        line: lineIndex,
+    }));
     const html = [];
     let firstParagraphDone = false;
     let index = 0;
 
-    const renderParagraph = value => {
-        const content = formatTutuInlineText(String(value).replace(/^[\s\u3000]+/, ''), typo);
+    const lineAttr = token => (markLines && token ? ` data-tutu-line="${token.line}"` : '');
+
+    // 当前正在渲染的行，供各渲染函数加行号
+    let currentToken = null;
+
+    const renderParagraph = (value, emph = false) => {
+        const content = formatTutuInlineText(String(value).replace(/^[\s\u3000]+/, ''), typo, emph);
         const cls = !firstParagraphDone ? 'tutu-typo-p tutu-typo-first' : 'tutu-typo-p';
 
         firstParagraphDone = true;
-        return `<p class="${cls}">${content}</p>`;
+        return `<p class="${cls}"${lineAttr(currentToken)}>${content}</p>`;
     };
 
     // ---------- 对话块：按说话人分配颜色 ----------
@@ -2625,10 +2758,11 @@ function formatTutuPlainHtml(text, typo = getTutuTypographyState()) {
 
             if (!narration || /^[。！？!?…~～、\s]+$/.test(narration)) return '';
 
-            return `<div class="tutu-dialogue-action">${formatTutuInlineText(narration, typo)}</div>`;
+            // 叙述里没被当成台词的引号是强调，换成强调样式
+            return `<div class="tutu-dialogue-action">${formatTutuInlineText(narration, typo, true)}</div>`;
         }).join('');
 
-        return `<div class="tutu-dialogue tutu-speaker-${color}">${nameHtml}${body}</div>`;
+        return `<div class="tutu-dialogue tutu-speaker-${color}"${lineAttr(currentToken)}>${nameHtml}${body}</div>`;
     };
 
     const renderDialogue = token => {
@@ -2642,37 +2776,95 @@ function formatTutuPlainHtml(text, typo = getTutuTypographyState()) {
         return buildDialogueBlock(speaker, [{ type: 'speech', text: token.text }]);
     };
 
+    /** 识别出的说话人被手动改名时：叙述开头的旧名字也要去掉 */
+    const applyForcedName = (speaker, forcedName) => {
+        if (!forcedName) return speaker;
+
+        return { name: forcedName, key: forcedName, replaced: speaker?.name || '' };
+    };
+
     /** 普通叙述行：开启对话排版且含台词引号时，渲染成对话块 */
-    const renderTextLine = line => {
+    const renderTextLine = token => {
+        const line = token.text;
+        const mode = token.mode || '';
+
         if (!typo.dialogueBlock) return renderParagraph(line);
 
-        const parts = splitTutuSpeechSegments(line);
+        // 手动取消气泡：原样段落（引号按普通高亮）
+        if (mode === 'plain') return renderParagraph(line);
 
-        if (!parts.some(part => part.type === 'speech')) return renderParagraph(line);
+        // 手动标成强调：所有引号都是强调样式，不出气泡
+        if (mode === 'emph') return renderParagraph(line, true);
+
+        let parts;
+
+        if (mode === 'speech') {
+            // 手动标成台词：所有台词引号都算台词；整行没引号就整行当台词
+            parts = [];
+            let last = 0;
+            let match;
+
+            TUTU_SPEECH_QUOTE.lastIndex = 0;
+
+            while ((match = TUTU_SPEECH_QUOTE.exec(line))) {
+                if (match.index > last) parts.push({ type: 'narration', text: line.slice(last, match.index) });
+                parts.push({ type: 'speech', text: match[0].slice(1, -1).trim(), quote: match[0] });
+                last = match.index + match[0].length;
+            }
+
+            if (last < line.length) parts.push({ type: 'narration', text: line.slice(last) });
+
+            if (!parts.some(part => part.type === 'speech')) {
+                parts = [{ type: 'speech', text: line.trim() }];
+            }
+        } else {
+            parts = splitTutuSpeechSegments(line);
+
+            // 没有台词：引号都是强调
+            if (!parts.some(part => part.type === 'speech')) return renderParagraph(line, true);
+        }
 
         const firstNarration = parts[0].type === 'narration' ? parts[0].text : '';
         const lastNarration = parts[parts.length - 1].type === 'narration'
             ? parts[parts.length - 1].text
             : '';
 
-        const speaker = findTutuSpeaker(firstNarration, knownNames)
+        let speaker = findTutuSpeaker(firstNarration, knownNames)
             || findTutuSpeaker(lastNarration.replace(/^[，,\s]+/, ''), knownNames)
             || inferSpeaker();
+
+        speaker = applyForcedName(speaker, token.forcedName);
+
+        // 改名后叙述开头还留着识别错的名字（如「欲宓抬眼」被识别成「欲宓抬」），一起去掉
+        if (speaker.replaced && parts[0].type === 'narration') {
+            const head = parts[0].text.replace(/^[\s\u3000]+/, '');
+
+            if (head.startsWith(speaker.replaced) && !head.startsWith(speaker.name)) {
+                parts = [{ ...parts[0], text: head.slice(speaker.replaced.length) }, ...parts.slice(1)];
+            }
+        }
 
         rememberSpeaker(speaker);
 
         return buildDialogueBlock(speaker, parts);
     };
 
+    // 手动标成台词气泡的「名字：」行不进微信聊天
+    const isChatToken = item => (
+        ['time', 'system', 'blank'].includes(item.type) ||
+        (item.type === 'dialogue' && item.mode !== 'speech')
+    );
+
     while (index < tokens.length) {
         const token = tokens[index];
+        currentToken = token;
 
         // 收集一段连续的聊天行（允许中间夹空行）
-        if (typo.chatBubble && ['dialogue', 'time', 'system'].includes(token.type)) {
+        if (typo.chatBubble && token.type !== 'blank' && isChatToken(token)) {
             let end = index;
             let lastContent = index;
 
-            while (end < tokens.length && ['dialogue', 'time', 'system', 'blank'].includes(tokens[end].type)) {
+            while (end < tokens.length && isChatToken(tokens[end])) {
                 if (tokens[end].type !== 'blank') lastContent = end;
                 end++;
             }
@@ -2687,7 +2879,7 @@ function formatTutuPlainHtml(text, typo = getTutuTypographyState()) {
             );
 
             if (isChat) {
-                html.push(renderTutuChatRun(run, typo));
+                html.push(renderTutuChatRun(run, typo, markLines));
                 firstParagraphDone = true;
                 index = lastContent + 1;
                 continue;
@@ -2697,7 +2889,7 @@ function formatTutuPlainHtml(text, typo = getTutuTypographyState()) {
         if (token.type === 'dialogue') {
             html.push(renderDialogue(token));
         } else if (token.type !== 'blank') {
-            html.push(token.type === 'text' ? renderTextLine(token.text) : renderParagraph(token.text));
+            html.push(token.type === 'text' ? renderTextLine(token) : renderParagraph(token.text));
         }
 
         index++;
@@ -2776,10 +2968,28 @@ ${s} .tutu-dialogue-name {
 }
 ${s} .tutu-dialogue-name::after {
     content: "";
-    flex: 0 0 2.2em;
-    height: 1px;
+    flex: 0 0 4px;
+    width: 4px;
+    height: 1.05em;
+    border-radius: 2px;
     background: currentColor;
-    opacity: 0.6;
+}
+
+/* 强调引号：不是台词，用虚线下划 + 浅底的行内标签，和左边粗线的台词气泡区分 */
+${s} .tutu-emph {
+    padding: 0 0.15em;
+    border-radius: 3px;
+    border-bottom: 1.5px dashed ${quoteColor};
+    background: color-mix(in srgb, ${quoteColor} 10%, transparent);
+    color: inherit;
+    font-weight: 600;
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+}
+${s} .tutu-emph-mark {
+    color: ${quoteColor};
+    opacity: 0.7;
+    font-weight: 400;
 }
 ${s} .tutu-dialogue-action {
     margin-top: 0.2em;
@@ -3902,6 +4112,16 @@ localStorage.setItem(
 </div>
 
 <div
+    id="tutu_edit_dialogue_btn"
+    class="tutu-result-mode-btn"
+    role="button"
+    tabindex="0"
+    aria-label="修正对话气泡"
+    title="修正气泡：改说话人名字、取消气泡、区分台词和强调">
+    <i class="fa-solid fa-pen-to-square"></i>
+</div>
+
+<div
     id="tutu_fullscreen_current_btn"
     class="tutu-result-mode-btn"
     title="放大查看当前小剧场">
@@ -3927,6 +4147,33 @@ localStorage.setItem(
         </div>
 
         <pre id="tutu_result_source" class="tutu-result-source"></pre>
+
+        <!-- 对话气泡修正 -->
+        <div id="tutu_dialogue_editor" class="tutu-dialogue-editor" style="display:none;" role="region" aria-label="修正对话气泡">
+            <div class="tutu-dialogue-editor-head">
+                <div class="tutu-dialogue-editor-title">
+                    <i class="fa-solid fa-pen-to-square"></i>
+                    修正气泡
+                </div>
+                <div class="tutu-dialogue-editor-actions">
+                    <button type="button" id="tutu_dialogue_editor_reset" class="menu_button margin0" title="清除这段内容的所有修正，恢复自动识别">
+                        <i class="fa-solid fa-rotate-left"></i>
+                        <span>全部自动</span>
+                    </button>
+                    <button type="button" id="tutu_dialogue_editor_cancel" class="menu_button margin0" title="放弃修改">
+                        <i class="fa-solid fa-xmark"></i>
+                        <span>取消</span>
+                    </button>
+                    <button type="button" id="tutu_dialogue_editor_save" class="menu_button margin0 tutu-dialogue-editor-save" title="保存修正并重新渲染">
+                        <i class="fa-solid fa-floppy-disk"></i>
+                        <span>保存</span>
+                    </button>
+                </div>
+            </div>
+            <div id="tutu_dialogue_editor_hint" class="tutu-dialogue-editor-hint"></div>
+            <datalist id="tutu_dialogue_editor_names"></datalist>
+            <div id="tutu_dialogue_editor_list" class="tutu-dialogue-editor-list"></div>
+        </div>
 
     </div>
 
@@ -4584,7 +4831,7 @@ localStorage.setItem(
                 </label>
                 <label class="tutu-history-option">
                     <input type="checkbox" id="tutu_typo_dialogue_block">
-                    <span>对话排版：名字 —— 下一行台词</span>
+                    <span>对话排版：名字 ▌ 下一行台词</span>
                 </label>
             </div>
 
@@ -7483,6 +7730,9 @@ function closeTutuTheaterFullscreen() {
 
 
 function showTutuResultMode(mode) {
+    // 切换预览 / 源码或出新结果时关掉气泡编辑器（未保存的修改丢弃）
+    closeTutuDialogueEditor();
+
     if (mode === 'source') {
         $('#tutu_result_preview').hide();
         $('#tutu_result_source').show();
@@ -7497,6 +7747,257 @@ function showTutuResultMode(mode) {
         $('#tutu_show_source_btn').removeClass('active');
     }
 }
+
+// ==========================================
+// 对话气泡修正编辑器
+// ==========================================
+
+/** 编辑中的内容和草稿：{ text, draft: { 行号: { mode, name } } } */
+let tutuDialogueEditorState = null;
+
+const TUTU_LINE_MODE_OPTIONS = [
+    { value: '', label: '自动', title: '按自动识别显示' },
+    { value: 'speech', label: '台词', title: '显示成台词气泡（名字 + 粗竖线）' },
+    { value: 'emph', label: '强调', title: '引号是强调，不是说话：用强调样式，不出气泡' },
+    { value: 'plain', label: '无气泡', title: '取消气泡，按普通段落显示' },
+];
+
+/** 编辑器要列出的行：含引号的行、「名字：」行 */
+function collectTutuEditableLines(text) {
+    const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+    const quoteTest = /[“”「」『』"‘’]/;
+
+    return lines
+        .map((line, index) => ({ line, index }))
+        .filter(({ line }) => line.trim() && (quoteTest.test(line) || parseTutuDialogueLine(line)));
+}
+
+/** 根据当前草稿渲染预览，按行号拿到每行对应的块，读出自动识别的名字 */
+function renderTutuDialogueEditorPreview(text, draft) {
+    const typo = getTutuTypographyState();
+    const container = document.createElement('div');
+
+    container.innerHTML = formatTutuPlainHtml(text, typo, { overrides: draft, markLines: true });
+
+    const blocks = new Map();
+
+    container.querySelectorAll('[data-tutu-line]').forEach(element => {
+        blocks.set(Number(element.getAttribute('data-tutu-line')), element);
+    });
+
+    return blocks;
+}
+
+function describeTutuBlock(element) {
+    if (!element) return { kind: '段落', name: '' };
+
+    if (element.classList.contains('tutu-dialogue')) {
+        const name = element.querySelector('.tutu-dialogue-name')?.textContent || '';
+        return { kind: '台词气泡', name };
+    }
+
+    if (element.classList.contains('tutu-chat-row')) {
+        const name = element.querySelector('.tutu-chat-name')?.textContent || '';
+        return { kind: '聊天气泡', name };
+    }
+
+    if (element.querySelector('.tutu-emph')) return { kind: '强调', name: '' };
+
+    return { kind: '段落', name: '' };
+}
+
+function renderTutuDialogueEditor() {
+    const state = tutuDialogueEditorState;
+    const $list = $('#tutu_dialogue_editor_list');
+
+    if (!state) return;
+
+    const typo = getTutuTypographyState();
+    const items = collectTutuEditableLines(state.text);
+    const blocks = renderTutuDialogueEditorPreview(state.text, state.draft);
+
+    // 名字候选：已知角色 + 自动识别出的名字 + 已改过的名字
+    const names = new Set(collectTutuKnownSpeakerNames([]));
+    blocks.forEach(element => {
+        const name = describeTutuBlock(element).name;
+        if (name) names.add(name);
+    });
+    Object.values(state.draft).forEach(item => item?.name && names.add(item.name));
+
+    $('#tutu_dialogue_editor_names').html(
+        [...names].map(name => `<option value="${escapeHtml(name)}"></option>`).join('')
+    );
+
+    const hints = [];
+    if (!typo.enabled) hints.push('排版美化未启用，修正保存后要开启排版美化才会显示。');
+    else if (!typo.dialogueBlock && !typo.chatBubble) hints.push('「对话排版」和「微信气泡」都没开，台词气泡不会显示，可在排版设置里打开。');
+    else if (!typo.dialogueBlock) hints.push('「对话排版」没开，只有微信聊天会出气泡。');
+    hints.push('名字留空 = 用自动识别的名字；「强调」用于引号只是强调词、不是说话的情况。');
+    $('#tutu_dialogue_editor_hint').text(hints.join(' '));
+
+    if (!items.length) {
+        $list.html('<div class="tutu-dialogue-editor-empty">这段内容里没有台词或引号，不需要修正。</div>');
+        return;
+    }
+
+    const html = items.map(({ line, index }) => {
+        const draft = state.draft[index] || {};
+        const mode = draft.mode || '';
+        const element = blocks.get(index);
+        const info = describeTutuBlock(element);
+        const showName = mode !== 'emph' && mode !== 'plain';
+        const autoName = draft.name ? '' : info.name;
+
+        const modeButtons = TUTU_LINE_MODE_OPTIONS.map(option => `
+            <button type="button"
+                class="tutu-line-mode-btn${option.value === mode ? ' active' : ''}"
+                data-mode="${option.value}"
+                aria-pressed="${option.value === mode ? 'true' : 'false'}"
+                title="${option.title}">${option.label}</button>`).join('');
+
+        // 聊天行要套一层 .tutu-chat 才有聊天背景和左右排布
+        const blockHtml = element?.classList.contains('tutu-chat-row')
+            ? `<div class="tutu-chat">${element.outerHTML}</div>`
+            : element?.outerHTML || '';
+
+        const preview = blockHtml
+            ? `<div class="tutu-dialogue-editor-preview tutu-typo-plain tutu-typo-formatted">${blockHtml}</div>`
+            : '';
+
+        return `
+            <div class="tutu-dialogue-editor-item${draft.mode || draft.name ? ' changed' : ''}" data-line="${index}">
+                <div class="tutu-dialogue-editor-meta">
+                    <span class="tutu-dialogue-editor-line">第 ${index + 1} 行</span>
+                    <span class="tutu-dialogue-editor-kind">${escapeHtml(info.kind)}</span>
+                </div>
+                <div class="tutu-dialogue-editor-source">${escapeHtml(line.trim())}</div>
+                <div class="tutu-dialogue-editor-controls">
+                    <div class="tutu-line-mode-group" role="group" aria-label="第 ${index + 1} 行样式">${modeButtons}</div>
+                    ${showName ? `
+                    <input type="text"
+                        class="text_pole tutu-line-name-input"
+                        list="tutu_dialogue_editor_names"
+                        maxlength="12"
+                        value="${escapeHtml(draft.name || '')}"
+                        placeholder="${autoName ? `自动：${escapeHtml(autoName)}` : '说话人名字'}"
+                        aria-label="第 ${index + 1} 行说话人">` : ''}
+                </div>
+                ${preview}
+            </div>`;
+    }).join('');
+
+    $list.html(html);
+}
+
+function openTutuDialogueEditor() {
+    const text = String(tutuCurrentResultContent || '');
+
+    if (!text.trim()) {
+        toastr.warning('还没有可以修正的内容');
+        return;
+    }
+
+    if (isProbablyHtml(text)) {
+        toastr.info('HTML 小剧场不使用气泡排版，不需要修正');
+        return;
+    }
+
+    tutuDialogueEditorState = {
+        text,
+        draft: JSON.parse(JSON.stringify(getTutuDialogueOverrides(text))),
+    };
+
+    renderTutuDialogueEditor();
+
+    $('#tutu_result_preview').hide();
+    $('#tutu_result_source').hide();
+    $('#tutu_dialogue_editor').show();
+    $('#tutu_edit_dialogue_btn').addClass('active');
+}
+
+function closeTutuDialogueEditor() {
+    if (!tutuDialogueEditorState && !$('#tutu_dialogue_editor').is(':visible')) return;
+
+    tutuDialogueEditorState = null;
+    $('#tutu_dialogue_editor').hide();
+    $('#tutu_dialogue_editor_list').empty();
+    $('#tutu_edit_dialogue_btn').removeClass('active');
+}
+
+function updateTutuDialogueDraft(lineIndex, patch) {
+    const state = tutuDialogueEditorState;
+    if (!state) return;
+
+    const next = sanitizeTutuLineOverride({ ...(state.draft[lineIndex] || {}), ...patch });
+
+    if (next) state.draft[lineIndex] = next;
+    else delete state.draft[lineIndex];
+}
+
+$(document).on('click keydown', '#tutu_edit_dialogue_btn', function (event) {
+    if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+
+    if ($('#tutu_dialogue_editor').is(':visible')) {
+        closeTutuDialogueEditor();
+        showTutuResultMode('preview');
+    } else {
+        openTutuDialogueEditor();
+    }
+});
+
+$(document).on('click', '#tutu_dialogue_editor .tutu-line-mode-btn', function () {
+    const lineIndex = Number($(this).closest('.tutu-dialogue-editor-item').attr('data-line'));
+    const mode = String($(this).attr('data-mode') || '');
+
+    updateTutuDialogueDraft(lineIndex, { mode });
+    renderTutuDialogueEditor();
+});
+
+// 改名字只更新草稿；失焦 / 回车时刷新预览，避免打字时输入框被重建
+$(document).on('input', '#tutu_dialogue_editor .tutu-line-name-input', function () {
+    const lineIndex = Number($(this).closest('.tutu-dialogue-editor-item').attr('data-line'));
+
+    updateTutuDialogueDraft(lineIndex, { name: String($(this).val() || '') });
+    $(this).closest('.tutu-dialogue-editor-item').addClass('changed');
+});
+
+$(document).on('change', '#tutu_dialogue_editor .tutu-line-name-input', function () {
+    renderTutuDialogueEditor();
+});
+
+$(document).on('keydown', '#tutu_dialogue_editor .tutu-line-name-input', function (event) {
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        $(this).trigger('change');
+    }
+});
+
+$(document).on('click', '#tutu_dialogue_editor_reset', function () {
+    if (!tutuDialogueEditorState) return;
+
+    tutuDialogueEditorState.draft = {};
+    renderTutuDialogueEditor();
+    toastr.info('已恢复自动识别，点「保存」生效');
+});
+
+$(document).on('click', '#tutu_dialogue_editor_cancel', function () {
+    closeTutuDialogueEditor();
+    showTutuResultMode('preview');
+});
+
+$(document).on('click', '#tutu_dialogue_editor_save', function () {
+    const state = tutuDialogueEditorState;
+    if (!state) return;
+
+    saveTutuDialogueOverrides(state.text, state.draft);
+    closeTutuDialogueEditor();
+
+    // 面板、已嵌入楼层、收藏一起重新渲染
+    refreshTutuCurrentRender();
+    toastr.success('气泡修正已保存');
+});
+
 let tutuCurrentCharacterContext = {
     character: null,
     characterName: 'AI',

@@ -1548,6 +1548,205 @@
     flex-shrink: 0;
 }
 
+/* ---- 对话气泡修正编辑器 ---- */
+.tutu-dialogue-editor {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 70vh;
+    overflow-y: auto;
+    padding: 0 2px 8px;
+}
+
+.tutu-dialogue-editor-head {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    padding: 6px 0;
+    background: var(--SmartThemeBlurTintColor, rgba(20, 20, 24, 0.92));
+    backdrop-filter: blur(6px);
+}
+
+.tutu-dialogue-editor-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+}
+
+.tutu-dialogue-editor-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-left: auto;
+}
+
+.tutu-dialogue-editor-actions .menu_button {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    font-size: 0.85em;
+}
+
+.tutu-dialogue-editor-save {
+    border-color: var(--SmartThemeQuoteColor, #c96f4a) !important;
+    color: var(--SmartThemeQuoteColor, #c96f4a) !important;
+    font-weight: 600;
+}
+
+.tutu-dialogue-editor-hint {
+    font-size: 0.78em;
+    opacity: 0.65;
+    line-height: 1.5;
+}
+
+.tutu-dialogue-editor-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.tutu-dialogue-editor-empty {
+    padding: 20px 0;
+    text-align: center;
+    opacity: 0.6;
+}
+
+.tutu-dialogue-editor-item {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 10px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+}
+
+.tutu-dialogue-editor-item.changed {
+    border-color: var(--SmartThemeQuoteColor, #c96f4a);
+    box-shadow: inset 3px 0 0 var(--SmartThemeQuoteColor, #c96f4a);
+}
+
+.tutu-dialogue-editor-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 0.75em;
+    opacity: 0.65;
+}
+
+.tutu-dialogue-editor-kind {
+    padding: 0 6px;
+    border-radius: 999px;
+    border: 1px solid currentColor;
+}
+
+.tutu-dialogue-editor-source {
+    font-size: 0.82em;
+    line-height: 1.5;
+    opacity: 0.8;
+    word-break: break-word;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+
+.tutu-dialogue-editor-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+.tutu-line-mode-group {
+    display: inline-flex;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    overflow: hidden;
+    flex-shrink: 0;
+}
+
+.tutu-line-mode-btn {
+    min-height: 30px;
+    padding: 3px 10px;
+    border: 0;
+    border-right: 1px solid var(--SmartThemeBorderColor);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 0.82em;
+    cursor: pointer;
+    opacity: 0.75;
+}
+
+.tutu-line-mode-btn:last-child {
+    border-right: 0;
+}
+
+.tutu-line-mode-btn:hover {
+    opacity: 1;
+}
+
+.tutu-line-mode-btn.active {
+    opacity: 1;
+    font-weight: 600;
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor, #c96f4a) 20%, transparent);
+}
+
+.tutu-line-mode-btn:focus-visible {
+    outline: 2px solid var(--SmartThemeQuoteColor, #c96f4a);
+    outline-offset: -2px;
+}
+
+.tutu-line-name-input {
+    flex: 1 1 120px;
+    min-width: 0;
+    max-width: 220px;
+    margin: 0 !important;
+    min-height: 30px;
+    font-size: 0.85em;
+}
+
+.tutu-dialogue-editor-preview {
+    padding: 6px 8px;
+    border-radius: 6px;
+    background: rgba(127, 127, 127, 0.08);
+    font-size: 0.9em;
+}
+
+.tutu-dialogue-editor-preview .tutu-typo-p,
+.tutu-dialogue-editor-preview .tutu-dialogue {
+    margin: 0 !important;
+}
+
+.tutu-dialogue-editor-preview .tutu-typo-first::first-letter {
+    float: none;
+    font-size: inherit;
+    margin: 0;
+}
+
+@media (max-width: 600px) {
+    .tutu-dialogue-editor-actions .menu_button span {
+        display: none;
+    }
+
+    .tutu-line-mode-btn {
+        min-height: 36px;
+        padding: 3px 9px;
+    }
+
+    .tutu-line-name-input {
+        max-width: none;
+        flex-basis: 100%;
+    }
+}
+
 /* 副 API 最大输出长度 */
 .tutu-max-tokens-row {
     display: flex;
