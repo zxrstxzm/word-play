@@ -5493,6 +5493,18 @@ details.tutu-captured-element > .tutu-capture-actions-bar {
     }
 }
 
+/* 续写按钮：生成中禁用 */
+#tutu_continue_current_btn.disabled {
+    opacity: 0.4;
+    pointer-events: none;
+}
+
+/* 捕捉标签里的纯文本小剧场应用排版时，按钮栏保持原样 */
+.tutu-typo-rendered > .tutu-capture-actions-bar {
+    font-size: 13px;
+    line-height: 1.4;
+}
+
 /* 防截断：嵌入 / 收藏的 iframe 由内容高度决定，不再被固定高度裁掉 */
 .tutu-theater-embed-body,
 .tutu-favorite-html-container {

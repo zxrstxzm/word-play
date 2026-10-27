@@ -1237,7 +1237,7 @@ const preview =
                             </div>
                         </div>
 
-<div class="tutu-favorite-preview">
+<div class="tutu-favorite-preview${isHtmlFavorite ? '' : ' tutu-typo-plain'}">
     ${
         isHtmlFavorite
             ? `
@@ -1951,20 +1951,14 @@ function buildTutuRenderedContent(content, scenarioId) {
         ? `<style id="tutu-render-css">\n${cssText.replace(/<\/style/gi, '<\\/style')}\n</style>`
         : '';
 
-    const isFullDocument =
-        /<\/head>/i.test(replaced) ||
-        /<html[\s>]/i.test(replaced) ||
-        /^<!doctype/i.test(replaced.trim());
-
     /*
-     * 排版美化：
-     * - 纯文本 / 片段（兔兔自己包的文档）完整应用
-     * - 完整 HTML 文档仅在勾选「同时应用到 HTML」时应用字体字号颜色
-     * 排版写在用户 CSS 之前，用户 CSS 可以覆盖。
+     * 排版美化只作用于纯文本（txt）小剧场：
+     * 按原始内容判断，原文是纯文本时才应用（即使渲染正则 / CSS 让它进了 iframe）；
+     * HTML 小剧场单独一类，不受排版影响。
      */
-    const typoCss = isFullDocument
-        ? (getTutuTypographyState().applyHtml ? buildTutuTypographyIframeCss(false) : '')
-        : buildTutuTypographyIframeCss(true);
+    const typoCss = isProbablyHtml(raw)
+        ? ''
+        : buildTutuTypographyIframeCss();
 
     const typoTag = typoCss
         ? `<style id="tutu-typography-css">\n${typoCss}\n</style>`
@@ -2088,7 +2082,6 @@ function getDefaultTutuTypography() {
         bgColor: '',
         bgImage: '',
         padding: 14,
-        applyHtml: false,
     };
 }
 
@@ -2217,23 +2210,25 @@ function buildTutuTypographyDeclarations(typo, family, withBackground, important
 }
 
 /**
- * iframe 内部的排版 CSS。
- * plain=true：兔兔自己包装的纯文本 / 片段文档，完整应用含背景；
- * plain=false：完整 HTML 文档，只改字体字号行距颜色，且不加 !important，内部样式可覆盖。
+ * 纯文本小剧场进入 iframe（开了渲染 CSS / 正则）时的排版 CSS。
+ * 使用 !important，避免被渲染 CSS、一键自适应覆盖。
  */
-function buildTutuTypographyIframeCss(plain) {
+function buildTutuTypographyIframeCss() {
     const typo = getTutuTypographyState();
 
     if (!typo.enabled) return '';
 
     const { fontFace, family } = getTutuTypographyFont(typo);
-    const body = buildTutuTypographyDeclarations(typo, family, plain, false);
+    const body = buildTutuTypographyDeclarations(typo, family, true, true);
 
     return `${fontFace}\nbody {\n    ${body};\n}`;
 }
 
 /**
- * 页面上不走 iframe 的纯文本（面板预览、嵌入楼层、全屏）的全局排版样式。
+ * 页面上不走 iframe 的纯文本排版样式：
+ * - .tutu-typo-plain：兔兔用 textContent 显示的原文（面板预览、嵌入楼层、全屏、收藏），保留换行
+ * - .tutu-typo-rendered：捕捉标签里由酒馆渲染过的纯文本（换行已转成 <br>/<p>）
+ * HTML 小剧场不会带这两个类。
  */
 function applyTutuTypographyStyle() {
     const styleId = 'tutu_typography_style';
@@ -2256,13 +2251,30 @@ function applyTutuTypographyStyle() {
     const declarations = buildTutuTypographyDeclarations(typo, family, true, true);
 
     style.textContent = `${fontFace}
-.tutu-typo-plain {
+.tutu-typo-plain,
+.tutu-typo-rendered {
     ${declarations};
-    white-space: pre-wrap !important;
     word-break: break-word !important;
     border-radius: 8px;
     box-sizing: border-box;
+}
+.tutu-typo-plain {
+    white-space: pre-wrap !important;
+}
+.tutu-typo-rendered :is(p, span, em, i, strong, b, q, li, blockquote, font) {
+    font-family: inherit !important;
+    font-size: inherit !important;
+    line-height: inherit !important;
 }`;
+}
+
+/**
+ * 捕捉标签内容是否为纯文本：只含酒馆 Markdown 产生的简单标签。
+ */
+function isTutuCapturedPlainText(html) {
+    return !isProbablyHtml(
+        String(html || '').replace(/<\/?(p|br|em|i|strong|b|q|span|del|u|s)(\s[^>]*)?>/gi, '')
+    );
 }
 
 // ==========================================
@@ -3181,6 +3193,16 @@ localStorage.setItem(
 
 
         <div
+            id="tutu_continue_current_btn"
+            class="tutu-result-mode-btn"
+            role="button"
+            tabindex="0"
+            aria-label="续写当前小剧场"
+            title="续写：以当前内容为开头继续生成（生成到一半中断时使用）">
+            <i class="fa-solid fa-forward"></i>
+        </div>
+
+        <div
             id="tutu_favorite_current_btn"
             class="tutu-result-mode-btn"
             title="收藏当前小剧场">
@@ -3837,11 +3859,6 @@ localStorage.setItem(
                 <input id="tutu_typo_bg_image" class="text_pole" type="text" placeholder="https://...（铺满居中）">
             </div>
 
-            <label class="tutu-history-option">
-                <input type="checkbox" id="tutu_typo_apply_html">
-                <span>同时应用到 HTML 小剧场（只改字体 / 字号 / 行距 / 颜色，不改背景，HTML 自带样式优先）</span>
-            </label>
-
             <div class="tutu-appearance-actions">
                 <button type="button" id="tutu_typo_reset_btn" class="menu_button">
                     <i class="fa-solid fa-rotate-left"></i>
@@ -3850,8 +3867,9 @@ localStorage.setItem(
             </div>
 
             <div class="tutu-api-help">
-                改动立即生效并自动保存。作用于面板预览、嵌入楼层、全屏查看；
-                源码、导出和发给 AI 的内容不变。
+                只作用于纯文本（txt）小剧场，HTML 小剧场单独一类、保持原样。
+                范围：面板预览、嵌入楼层、捕捉标签、收藏、全屏查看。
+                改动立即生效并自动保存；源码、导出和发给 AI 的内容不变。
             </div>
         </div>
 
@@ -7411,16 +7429,83 @@ function getAutoGenerationScenario() {
     ).trim();
 }
 
+// 最近一次生成使用的情境，续写时沿用
+let tutuLastGenerationScenario = '';
+let tutuLastGenerationScenarioId = '';
+
+/** 续写时发给 AI 的已生成内容上限，避免超出上下文 */
+const TUTU_CONTINUE_MAX_CHARS = 12000;
+
+function buildTutuContinuePrompt(basePrompt, previous) {
+    const text = String(previous || '');
+    const tail = text.length > TUTU_CONTINUE_MAX_CHARS
+        ? text.slice(-TUTU_CONTINUE_MAX_CHARS)
+        : text;
+    const truncatedNote = tail.length < text.length
+        ? '（以下只保留了已生成内容的末尾部分）\n'
+        : '';
+
+    return `${basePrompt}
+
+【续写任务】
+上一轮小剧场生成到一半中断了。下面是已经生成的内容，请严格从它的最后一个字符之后无缝继续写完：
+- 不要重复已经写过的任何内容，不要从头重写，不要总结或解释
+- 保持相同的格式、文风和人称；如果是 HTML，直接接着未完成的标签和代码往下写，并补全所有未闭合的标签
+- 不要加代码块标记（\`\`\`），不要加任何前言
+- 直接输出续写部分
+
+【已生成内容】
+${truncatedNote}${tail}`;
+}
+
+/**
+ * 拼接续写结果：去掉 AI 重复输出的重叠部分。
+ * 1. 续写以完整原文开头 → 视为 AI 重写了全文，直接用续写
+ * 2. 原文末尾与续写开头重叠 → 去掉重叠
+ */
+function mergeTutuContinuation(previous, continuation) {
+    const head = String(previous || '');
+    let tail = String(continuation || '');
+
+    if (!tail.trim()) return head;
+    if (!head) return tail;
+
+    if (tail.length > head.length && tail.startsWith(head.trimEnd())) {
+        return tail;
+    }
+
+    const maxOverlap = Math.min(head.length, tail.length, 2000);
+
+    // 至少 4 个字符才算重叠，避免误删正常的单字衔接
+    for (let size = maxOverlap; size >= 4; size--) {
+        if (head.endsWith(tail.slice(0, size))) {
+            tail = tail.slice(size);
+            break;
+        }
+    }
+
+    // 原文以完整行结束时，续写开头的空行没有意义；否则原样直接接上
+    if (/\n\s*$/.test(head)) {
+        tail = tail.replace(/^\s*\n/, '');
+    }
+
+    return head + tail;
+}
+
 async function runTutuGeneration({
     scenario = '',
     isAutomatic = false,
     scenarioId = '',
+    continueFrom = '',
 } = {}) {
     if (tutuIsGenerating) {
         return;
     }
 
     scenario = String(scenario || '').trim();
+    continueFrom = String(continueFrom || '');
+
+    const isContinue = Boolean(continueFrom.trim());
 
     if (!scenario) {
         if (isAutomatic) {
@@ -7450,30 +7535,45 @@ async function runTutuGeneration({
     const provider =
         $('#tutu_api_provider').val() || 'main';
 
-    $('#tutu_result_status').text(
-        isAutomatic
-            ? '🐰 收到最新剧情，兔兔正在生成番外……'
-            : '🐰 兔兔正在疯狂码字中……'
-    );
+    if (isContinue) {
+        // 续写时保留已有内容，只更新状态
+        $('#tutu_result_status').text('🐰 兔兔正在接着往下写……');
+    } else {
+        $('#tutu_result_status').text(
+            isAutomatic
+                ? '🐰 收到最新剧情，兔兔正在生成番外……'
+                : '🐰 兔兔正在疯狂码字中……'
+        );
 
-    $('#tutu_result_preview').html(`
-        <div class="tutu-result-placeholder">
-            🐰 正在生成小剧场……
-        </div>
-    `);
+        $('#tutu_result_preview').html(`
+            <div class="tutu-result-placeholder">
+                🐰 正在生成小剧场……
+            </div>
+        `);
 
-    $('#tutu_result_source').text('');
+        $('#tutu_result_source').text('');
+    }
 
     setTutuGenerateButtonState(true);
 
     try {
 await refreshTutuCharacterContext();
 
-tutuCurrentResultCharacter =
-    getCurrentTutuCharacterName();
+if (!isContinue) {
+    tutuCurrentResultCharacter =
+        getCurrentTutuCharacterName();
+}
 
-const aiPrompt =
+tutuLastGenerationScenario = scenario;
+tutuLastGenerationScenarioId =
+    scenarioId || findTutuScenarioIdByPrompt(scenario) || '';
+
+const basePrompt =
     buildTutuContextPrompt(scenario);
+
+const aiPrompt = isContinue
+    ? buildTutuContinuePrompt(basePrompt, continueFrom)
+    : basePrompt;
 
 
         let result;
@@ -7508,21 +7608,35 @@ const aiPrompt =
             throw createTutuCancelError();
         }
 
-        result = cleanGeneratedContent(result);
+        if (isContinue) {
+            // 续写部分只去掉代码块标记，保留开头空白以便无缝衔接
+            const continuation = String(result || '')
+                .replace(/^\s*```(?:html|HTML|xml|XML)?[ \t]*\r?\n?/, '')
+                .replace(/\r?\n?\s*```\s*$/, '');
+
+            if (!continuation.trim()) {
+                throw new Error('续写没有返回新内容');
+            }
+
+            result = mergeTutuContinuation(continueFrom, continuation);
+        } else {
+            result = cleanGeneratedContent(result);
+        }
 
         // 记录内容来源剧本，供绑定条目的渲染正则使用
         rememberTutuContentScenario(
             result,
-            scenarioId || findTutuScenarioIdByPrompt(scenario)
+            tutuLastGenerationScenarioId
         );
 
         // ★ 根据输出方式决定结果去向
         const outputMode = tutuSettings.outputMode || 'panel';
 
 if (outputMode === 'embed') {
+    // 续写时替换楼层里那半截小剧场
     await embedTutuTheaterToChat(
         result,
-        !isAutomatic
+        !isAutomatic || isContinue
     );
 
     showTutuResult(result);
@@ -7535,12 +7649,13 @@ if (outputMode === 'embed') {
  * 生成完成提示
  */
 $('#tutu_result_status').text(
-    outputMode === 'embed'
-        ? '生成完成，已嵌入最新 AI 回复楼层。'
-        : '生成完成。'
+    (isContinue ? '续写完成' : '生成完成') +
+    (outputMode === 'embed' ? '，已嵌入最新 AI 回复楼层。' : '。')
 );
 
-if (outputMode === 'embed') {
+if (isContinue) {
+    toastr.success('已接着上文续写完成，可再次续写', '兔兔小剧场');
+} else if (outputMode === 'embed') {
     toastr.success(
         isAutomatic
             ? '已根据最新 AI 回复生成并嵌入小剧场'
@@ -7584,6 +7699,14 @@ if (outputMode === 'embed') {
     const errorMessage =
         getTutuErrorMessage(error) ||
         '生成失败，请检查 API 配置';
+
+    // 续写失败时保留原来的半截内容，不用错误覆盖
+    if (isContinue) {
+        showTutuResult(continueFrom);
+        $('#tutu_result_status').text(`❌ 续写失败：${errorMessage}`);
+        toastr.error(errorMessage, '兔兔小剧场续写失败');
+        return;
+    }
 
     const displayError =
         `❌ 小剧场生成失败\n\n${errorMessage}`;
@@ -7668,6 +7791,7 @@ function setTutuGenerateButtonState(isGenerating) {
         .toggleClass('fa-stop', isGenerating);
 
     $('#tutu_random_script_btn').toggleClass('disabled', isGenerating);
+    $('#tutu_continue_current_btn').toggleClass('disabled', isGenerating);
 }
 
 /**
@@ -8296,6 +8420,11 @@ function attachTutuCaptureActions(element) {
      * 给元素加上视觉标记
      */
     element.classList.add('tutu-captured-element');
+
+    // 纯文本小剧场应用排版美化；HTML 小剧场保持原样
+    if (isTutuCapturedPlainText(capturedContent)) {
+        element.classList.add('tutu-typo-rendered');
+    }
 }
 
 /**
@@ -12430,9 +12559,9 @@ $(document).on(
     }
 );
 
-// 历史聊天记录：只读标签 / 排除标签（全局保存）
+// 历史聊天记录：只读标签 / 排除标签 / 自动排除注释（全局，输入即自动保存）
 $(document).on(
-    'change',
+    'input change',
     '#tutu_history_include_tags, #tutu_history_exclude_tags, #tutu_history_exclude_comments',
     function () {
         tutuSettings.historyIncludeTags =
@@ -12503,7 +12632,6 @@ function loadTutuTypographyToUI() {
     $('#tutu_typo_text_color').val(typo.textColor || '');
     $('#tutu_typo_bg_color').val(typo.bgColor || '');
     $('#tutu_typo_bg_image').val(typo.bgImage || '');
-    $('#tutu_typo_apply_html').prop('checked', Boolean(typo.applyHtml));
 
     if (TUTU_HEX_COLOR.test(typo.textColor || '')) {
         $('#tutu_typo_text_color_picker').val(typo.textColor);
@@ -12539,7 +12667,6 @@ function saveTutuTypographyFromUI() {
         textColor: String($('#tutu_typo_text_color').val() || '').trim(),
         bgColor: String($('#tutu_typo_bg_color').val() || '').trim(),
         bgImage: String($('#tutu_typo_bg_image').val() || '').trim(),
-        applyHtml: $('#tutu_typo_apply_html').is(':checked'),
     };
 
     persistTutuSettings();
@@ -12554,7 +12681,7 @@ function saveTutuTypographyFromUI() {
 
 $(document).on(
     'input change',
-    '#tutu_typo_enabled, #tutu_typo_font_size, #tutu_typo_line_height, #tutu_typo_padding, #tutu_typo_font_preset, #tutu_typo_font_family, #tutu_typo_font_url, #tutu_typo_text_color, #tutu_typo_bg_color, #tutu_typo_bg_image, #tutu_typo_apply_html',
+    '#tutu_typo_enabled, #tutu_typo_font_size, #tutu_typo_line_height, #tutu_typo_padding, #tutu_typo_font_preset, #tutu_typo_font_family, #tutu_typo_font_url, #tutu_typo_text_color, #tutu_typo_bg_color, #tutu_typo_bg_image',
     saveTutuTypographyFromUI
 );
 
@@ -12817,6 +12944,9 @@ applyTutuTypographyStyle();
 $('#tutu_include_history').prop('checked', Boolean(tutuSettings.historyIncludeEnabled));
 $('#tutu_history_limit').val(Number(tutuSettings.historyLimitDefault) || 20);
 $('#tutu_history_limit_box').toggle(Boolean(tutuSettings.historyIncludeEnabled));
+$('#tutu_history_include_tags').val(tutuSettings.historyIncludeTags || '');
+$('#tutu_history_exclude_tags').val(tutuSettings.historyExcludeTags || '');
+$('#tutu_history_exclude_comments').prop('checked', tutuSettings.historyExcludeComments !== false);
 
 ensureTutuScenarioIds();
 initTutuAutoHeightListener();
@@ -13492,6 +13622,47 @@ $(document).on(
         runTutuGeneration({
             scenario,
             isAutomatic: false,
+        });
+    }
+);
+
+// 续写：以当前结果为开头，继续生成本轮
+$(document).on(
+    'click keydown',
+    '#tutu_continue_current_btn',
+    function (event) {
+        if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') {
+            return;
+        }
+
+        event.preventDefault();
+
+        if (tutuIsGenerating) {
+            toastr.info('正在生成中，可点击停止按钮取消');
+            return;
+        }
+
+        const previous = String(tutuCurrentResultContent || '');
+
+        if (!previous.trim()) {
+            toastr.warning('还没有可续写的内容，请先生成小剧场');
+            return;
+        }
+
+        // 优先沿用上次生成的情境；刷新页面后没有记录，使用输入框里的情境
+        const scenario =
+            tutuLastGenerationScenario ||
+            String($('#tutu_prompt').val() || '').trim() ||
+            '继续完成上一轮的小剧场';
+
+        runTutuGeneration({
+            scenario,
+            isAutomatic: false,
+            scenarioId:
+                tutuLastGenerationScenarioId ||
+                getTutuContentScenarioId(previous) ||
+                '',
+            continueFrom: previous,
         });
     }
 );
