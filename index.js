@@ -1237,7 +1237,7 @@ const preview =
                             </div>
                         </div>
 
-<div class="tutu-favorite-preview${isHtmlFavorite ? '' : ' tutu-typo-plain'}">
+<div class="tutu-favorite-preview${isHtmlFavorite ? '' : ' tutu-typo-plain'}${!isHtmlFavorite && isTutuTypographyFormatActive() ? ' tutu-typo-formatted' : ''}">
     ${
         isHtmlFavorite
             ? `
@@ -1263,7 +1263,9 @@ const preview =
                     </iframe>
                 </div>
             `
-            : escapeHtml(preview)
+            : isTutuTypographyFormatActive()
+                ? formatTutuPlainHtml(preview)
+                : escapeHtml(preview)
     }
 </div>
 
@@ -1968,7 +1970,9 @@ function buildTutuRenderedContent(content, scenarioId) {
         replaced,
         `${typoTag}\n${styleTag}`,
         isHtml,
-        regexChanged
+        regexChanged,
+        // 原文和正则结果都是纯文本时，用结构化排版（段落 / 气泡 / 对话块）
+        Boolean(typoCss) && !isHtml && !regexChanged
     );
 
     html = injectTutuAntiClip(html);
@@ -1976,7 +1980,7 @@ function buildTutuRenderedContent(content, scenarioId) {
     return { html, isHtml: true };
 }
 
-function buildTutuRenderedDocument(replaced, styleTag, isHtml, regexChanged) {
+function buildTutuRenderedDocument(replaced, styleTag, isHtml, regexChanged, formatPlain = false) {
     let html;
 
     if (/<\/head>/i.test(replaced)) {
@@ -1991,9 +1995,15 @@ function buildTutuRenderedDocument(replaced, styleTag, isHtml, regexChanged) {
          * 纯文本经正则处理后可能变成 HTML 片段，
          * 片段需要包一层文档，并保留换行。
          */
-        const body = isHtml || regexChanged
-            ? replaced
-            : escapeHtml(replaced);
+        let body;
+
+        if (isHtml || regexChanged) {
+            body = replaced;
+        } else if (formatPlain) {
+            body = formatTutuPlainHtml(replaced);
+        } else {
+            body = escapeHtml(replaced);
+        }
 
         html = `<!DOCTYPE html>
 <html>
@@ -2005,7 +2015,7 @@ body { margin: 0; padding: 12px; white-space: pre-wrap; word-break: break-word; 
 </style>
 ${styleTag}
 </head>
-<body class="tutu-render-body">${body}</body>
+<body class="tutu-render-body${formatPlain ? ' tutu-typo-formatted' : ''}">${body}</body>
 </html>`;
     }
 
@@ -2082,8 +2092,32 @@ function getDefaultTutuTypography() {
         bgColor: '',
         bgImage: '',
         padding: 14,
+        // 段落与版式
+        paddingX: 18,           // 左右边距（px）
+        letterSpacing: 0,       // 字间距（px）
+        paragraphSpacing: 0.6,  // 段间距（em）
+        textIndent: 0,          // 首行缩进（字）
+        maxWidth: 0,            // 整体宽度（px），0 = 不限
+        // 效果开关
+        quoteHighlight: false,  // 引号高亮
+        quoteColor: '#c96f4a',
+        dropCap: false,         // 首字放大
+        chatBubble: true,       // 微信聊天自动渲染成气泡
+        dialogueBlock: false,   // 对话改成「名字 —— / 换行台词」
     };
 }
+
+/** 数值设置的取值范围与默认值 */
+const TUTU_TYPO_NUMBER_RANGES = {
+    fontSize: [10, 40, 15],
+    lineHeight: [1, 3, 1.8],
+    padding: [0, 60, 14],
+    paddingX: [0, 80, 18],
+    letterSpacing: [-1, 8, 0],
+    paragraphSpacing: [0, 3, 0.6],
+    textIndent: [0, 4, 0],
+    maxWidth: [0, 2000, 0],
+};
 
 /** 去掉可能跳出 CSS 声明的字符 */
 function sanitizeTutuCssValue(value) {
@@ -2123,19 +2157,13 @@ function getTutuTypographyState() {
         ...(tutuSettings.typography || {}),
     };
 
-    const fontSize = Number(typo.fontSize);
-    const lineHeight = Number(typo.lineHeight);
-    const padding = Number(typo.padding);
+    Object.entries(TUTU_TYPO_NUMBER_RANGES).forEach(([key, [min, max, fallback]]) => {
+        const value = Number(typo[key]);
 
-    typo.fontSize = Number.isFinite(fontSize)
-        ? Math.min(Math.max(fontSize, 10), 40)
-        : 15;
-    typo.lineHeight = Number.isFinite(lineHeight)
-        ? Math.min(Math.max(lineHeight, 1), 3)
-        : 1.8;
-    typo.padding = Number.isFinite(padding)
-        ? Math.min(Math.max(padding, 0), 60)
-        : 14;
+        typo[key] = Number.isFinite(value)
+            ? Math.min(Math.max(value, min), max)
+            : fallback;
+    });
 
     return typo;
 }
@@ -2203,10 +2231,352 @@ function buildTutuTypographyDeclarations(typo, family, withBackground, important
             rules.push(`background-repeat: no-repeat${imp}`);
         }
 
-        rules.push(`padding: ${typo.padding}px${imp}`);
+        // 上下内边距 + 左右边距
+        rules.push(`padding: ${typo.padding}px ${typo.paddingX}px${imp}`);
+    }
+
+    if (typo.letterSpacing) {
+        rules.push(`letter-spacing: ${typo.letterSpacing}px${imp}`);
+    }
+
+    // 整体宽度：限制最大宽度并居中
+    if (typo.maxWidth > 0) {
+        rules.push(`max-width: ${typo.maxWidth}px${imp}`);
+        rules.push(`margin-left: auto${imp}`);
+        rules.push(`margin-right: auto${imp}`);
     }
 
     return rules.join(';\n    ');
+}
+
+// ==========================================
+// 纯文本结构化排版：段落 / 首字放大 / 引号高亮 / 微信气泡 / 对话块
+// ==========================================
+
+/** 成对引号：中文双引号、单引号、直角引号、英文双引号 */
+const TUTU_QUOTE_PATTERN = /(“[^“”\n]*”|‘[^‘’\n]*’|「[^「」\n]*」|『[^『』\n]*』|"[^"\n]*")/g;
+
+/** 「名字：台词」，名字 1–12 个字，不含标点和空白 */
+const TUTU_DIALOGUE_LINE = /^\s*[【\[]?([^\s:：，。！？、,.!?“”"「」【】\[\]()（）<>《》]{1,12})[】\]]?\s*[:：]\s*(\S.*)$/;
+
+/** 名字以「说 / 道 / 问」等结尾时多半是叙述（他说：“……”），不当成对话行 */
+const TUTU_NARRATIVE_SPEAKER = /(说|道|问|答|喊|叫|笑|骂|吼|想|写|念|唱|哭|叹|嘟囔|回复|表示|开口)$/;
+
+/** 单独一行的时间：10:23、下午 3:05、2026-10-27 08:00 */
+const TUTU_TIME_LINE = /^\s*[\[【(（]?\s*(\d{4}[-/.]\d{1,2}[-/.]\d{1,2}\s*)?((上午|下午|晚上|凌晨|中午|早上|昨天|今天|星期.|周.)\s*)?\d{1,2}[:：]\d{2}(:\d{2})?\s*[\]】)）]?\s*$/;
+
+/** 单独一行的系统提示：[对方撤回了一条消息]、—— 以下是新消息 —— */
+const TUTU_SYSTEM_LINE = /^\s*([\[【（(][^\]】）)]{1,30}[\]】）)]|[—\-=·]{2,}.{0,30}[—\-=·]{2,})\s*$/;
+
+/** 聊天软件信号 */
+const TUTU_CHAT_KEYWORDS = /(微信|聊天记录|聊天界面|群聊|私聊|QQ|短信|消息记录|朋友圈|对话框)/i;
+const TUTU_CHAT_MEDIA = /\[(语音|图片|表情|表情包|转账|红包|撤回|视频|位置|文件|拍了拍|动画表情)[^\]]*\]/;
+
+function getTutuSelfNames() {
+    const names = new Set(['我', '自己', '{{user}}', 'user', 'me']);
+
+    try {
+        const name1 = String(SillyTavern.getContext()?.name1 || '').trim();
+        if (name1) names.add(name1);
+    } catch (error) {
+        // 非酒馆环境（测试）忽略
+    }
+
+    return names;
+}
+
+function getTutuCharNameForChat() {
+    try {
+        return String(SillyTavern.getContext()?.name2 || '').trim();
+    } catch (error) {
+        return '';
+    }
+}
+
+/** 转义 + 可选引号高亮 */
+function formatTutuInlineText(text, typo) {
+    const raw = String(text || '');
+
+    if (!typo.quoteHighlight) return escapeHtml(raw);
+
+    return raw
+        .split(TUTU_QUOTE_PATTERN)
+        .map((part, index) => (
+            index % 2 === 1
+                ? `<span class="tutu-typo-quote">${escapeHtml(part)}</span>`
+                : escapeHtml(part)
+        ))
+        .join('');
+}
+
+function parseTutuDialogueLine(line) {
+    const match = String(line || '').match(TUTU_DIALOGUE_LINE);
+
+    if (!match) return null;
+
+    const name = match[1].trim();
+
+    if (TUTU_NARRATIVE_SPEAKER.test(name) || /^\d+$/.test(name)) return null;
+
+    return { name, text: match[2].trim() };
+}
+
+function classifyTutuPlainLine(line) {
+    if (!String(line).trim()) return { type: 'blank' };
+    if (TUTU_TIME_LINE.test(line)) return { type: 'time', text: line.trim() };
+
+    const dialogue = parseTutuDialogueLine(line);
+    if (dialogue) return { type: 'dialogue', ...dialogue };
+
+    if (TUTU_SYSTEM_LINE.test(line)) return { type: 'system', text: line.trim() };
+
+    return { type: 'text', text: line };
+}
+
+/**
+ * 决定聊天气泡里哪个说话人在右边（自己）：
+ * 1. 名字是 我 / {{user}} / 用户名
+ * 2. 只有两个人且其中一个是当前角色 → 另一个在右边
+ */
+function pickTutuChatSelf(speakers) {
+    const selfNames = getTutuSelfNames();
+    const self = speakers.find(name => selfNames.has(name));
+
+    if (self) return self;
+
+    const charName = getTutuCharNameForChat();
+
+    if (speakers.length === 2 && charName && speakers.includes(charName)) {
+        return speakers.find(name => name !== charName);
+    }
+
+    return '';
+}
+
+function renderTutuChatRun(tokens, typo) {
+    const speakers = [...new Set(
+        tokens.filter(token => token.type === 'dialogue').map(token => token.name)
+    )];
+    const self = pickTutuChatSelf(speakers);
+
+    const rows = tokens.map(token => {
+        if (token.type === 'time' || token.type === 'system') {
+            return `<div class="tutu-chat-tip">${escapeHtml(token.text.replace(/^[\[【（(]|[\]】）)]$/g, ''))}</div>`;
+        }
+
+        const isSelf = token.name === self;
+        const avatar = escapeHtml(Array.from(token.name)[0] || '?');
+
+        return `<div class="tutu-chat-row${isSelf ? ' self' : ''}">`
+            + `<div class="tutu-chat-avatar" aria-hidden="true">${avatar}</div>`
+            + '<div class="tutu-chat-main">'
+            + `<div class="tutu-chat-name">${escapeHtml(token.name)}</div>`
+            + `<div class="tutu-chat-bubble">${escapeHtml(token.text)}</div>`
+            + '</div></div>';
+    });
+
+    return `<div class="tutu-chat">${rows.join('')}</div>`;
+}
+
+/**
+ * 纯文本 → 结构化 HTML（全部转义，安全）：
+ * - 每个非空行一个段落，第一个段落可首字放大
+ * - 连续的「名字：台词」+ 时间 / 系统提示，且有聊天信号时 → 微信气泡
+ * - 其余对话行在开启对话块时 → 名字 —— / 换行台词
+ */
+function formatTutuPlainHtml(text, typo = getTutuTypographyState()) {
+    const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+    const tokens = lines.map(classifyTutuPlainLine);
+    const html = [];
+    let firstParagraphDone = false;
+    let index = 0;
+
+    const renderParagraph = value => {
+        const content = formatTutuInlineText(String(value).replace(/^[\s\u3000]+/, ''), typo);
+        const cls = !firstParagraphDone ? 'tutu-typo-p tutu-typo-first' : 'tutu-typo-p';
+
+        firstParagraphDone = true;
+        return `<p class="${cls}">${content}</p>`;
+    };
+
+    const renderDialogue = token => {
+        if (!typo.dialogueBlock) {
+            return renderParagraph(`${token.name}：${token.text}`);
+        }
+
+        firstParagraphDone = true;
+        return '<div class="tutu-dialogue">'
+            + `<div class="tutu-dialogue-name">${escapeHtml(token.name)}</div>`
+            + `<div class="tutu-dialogue-text">${formatTutuInlineText(token.text, typo)}</div>`
+            + '</div>';
+    };
+
+    while (index < tokens.length) {
+        const token = tokens[index];
+
+        // 收集一段连续的聊天行（允许中间夹空行）
+        if (typo.chatBubble && ['dialogue', 'time', 'system'].includes(token.type)) {
+            let end = index;
+            let lastContent = index;
+
+            while (end < tokens.length && ['dialogue', 'time', 'system', 'blank'].includes(tokens[end].type)) {
+                if (tokens[end].type !== 'blank') lastContent = end;
+                end++;
+            }
+
+            const run = tokens.slice(index, lastContent + 1).filter(item => item.type !== 'blank');
+            const dialogues = run.filter(item => item.type === 'dialogue');
+            const nearby = lines.slice(Math.max(0, index - 2), index).join('\n');
+            const isChat = dialogues.length >= 2 && (
+                run.some(item => item.type === 'time') ||
+                dialogues.some(item => TUTU_CHAT_MEDIA.test(item.text)) ||
+                TUTU_CHAT_KEYWORDS.test(nearby)
+            );
+
+            if (isChat) {
+                html.push(renderTutuChatRun(run, typo));
+                firstParagraphDone = true;
+                index = lastContent + 1;
+                continue;
+            }
+        }
+
+        if (token.type === 'dialogue') {
+            html.push(renderDialogue(token));
+        } else if (token.type !== 'blank') {
+            html.push(renderParagraph(token.text));
+        }
+
+        index++;
+    }
+
+    return html.join('');
+}
+
+/** 结构化排版是否生效（启用排版即生效） */
+function isTutuTypographyFormatActive() {
+    return Boolean(getTutuTypographyState().enabled);
+}
+
+/**
+ * 把纯文本填进元素：启用排版时结构化渲染，否则 textContent 原样显示。
+ */
+function fillTutuPlainText(element, text) {
+    if (!element) return;
+
+    element.classList.add('tutu-typo-plain');
+
+    if (isTutuTypographyFormatActive()) {
+        element.innerHTML = formatTutuPlainHtml(text);
+        element.classList.add('tutu-typo-formatted');
+    } else {
+        element.textContent = String(text || '');
+        element.classList.remove('tutu-typo-formatted');
+    }
+}
+
+/**
+ * 结构化排版的 CSS。
+ * scope：段落容器选择器；iframe 里是 body，页面上是 .tutu-typo-formatted。
+ */
+function buildTutuTypographyStructureCss(typo, scope) {
+    const quoteColor = sanitizeTutuCssValue(typo.quoteColor) || '#c96f4a';
+    const s = scope;
+
+    return `
+${s} .tutu-typo-p {
+    margin: 0 0 ${typo.paragraphSpacing}em !important;
+    text-indent: ${typo.textIndent}em !important;
+}
+${s} .tutu-typo-p:last-child { margin-bottom: 0 !important; }
+${typo.dropCap ? `
+${s} .tutu-typo-first { text-indent: 0 !important; }
+${s} .tutu-typo-first::first-letter {
+    float: left;
+    font-size: 2.6em;
+    line-height: 1;
+    font-weight: 700;
+    margin: 0.06em 0.12em 0 0;
+    color: ${quoteColor};
+}` : ''}
+${s} .tutu-typo-quote { color: ${quoteColor} !important; }
+
+${s} .tutu-dialogue { margin: 0 0 ${Math.max(typo.paragraphSpacing, 0.4)}em; }
+${s} .tutu-dialogue-name {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    font-weight: 700;
+    font-size: 0.92em;
+    opacity: 0.9;
+}
+${s} .tutu-dialogue-name::after {
+    content: "";
+    flex: 0 0 2.2em;
+    height: 1px;
+    background: currentColor;
+    opacity: 0.45;
+}
+${s} .tutu-dialogue-text { margin-top: 0.15em; }
+
+${s} .tutu-chat {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 0.6em 0 ${Math.max(typo.paragraphSpacing, 0.6)}em;
+    padding: 12px 10px;
+    border-radius: 10px;
+    background: rgba(127, 127, 127, 0.08);
+    text-indent: 0;
+    letter-spacing: normal;
+}
+${s} .tutu-chat-tip {
+    align-self: center;
+    font-size: 0.75em;
+    opacity: 0.6;
+    padding: 1px 8px;
+    border-radius: 4px;
+    background: rgba(127, 127, 127, 0.12);
+}
+${s} .tutu-chat-row { display: flex; align-items: flex-start; gap: 8px; }
+${s} .tutu-chat-row.self { flex-direction: row-reverse; }
+${s} .tutu-chat-avatar {
+    flex: 0 0 34px;
+    width: 34px;
+    height: 34px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    font-weight: 700;
+    color: #fff;
+    background: #8a9bb0;
+}
+${s} .tutu-chat-row.self .tutu-chat-avatar { background: #6aa36f; }
+${s} .tutu-chat-main {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    max-width: 72%;
+    min-width: 0;
+}
+${s} .tutu-chat-row.self .tutu-chat-main { align-items: flex-end; }
+${s} .tutu-chat-name { font-size: 0.72em; opacity: 0.6; margin: 0 2px 2px; }
+${s} .tutu-chat-bubble {
+    position: relative;
+    padding: 7px 11px;
+    border-radius: 6px;
+    font-size: 0.95em;
+    line-height: 1.55;
+    color: #222;
+    background: #fff;
+    box-shadow: 0 1px 1px rgba(0, 0, 0, 0.06);
+    word-break: break-word;
+    white-space: pre-wrap;
+}
+${s} .tutu-chat-row.self .tutu-chat-bubble { background: #95ec69; }
+`;
 }
 
 /**
@@ -2221,7 +2591,8 @@ function buildTutuTypographyIframeCss() {
     const { fontFace, family } = getTutuTypographyFont(typo);
     const body = buildTutuTypographyDeclarations(typo, family, true, true);
 
-    return `${fontFace}\nbody {\n    ${body};\n}`;
+    return `${fontFace}\nbody {\n    ${body};\n}\nbody.tutu-typo-formatted { white-space: normal !important; }\n`
+        + buildTutuTypographyStructureCss(typo, 'body');
 }
 
 /**
@@ -2261,11 +2632,30 @@ function applyTutuTypographyStyle() {
 .tutu-typo-plain {
     white-space: pre-wrap !important;
 }
+.tutu-typo-plain.tutu-typo-formatted {
+    white-space: normal !important;
+}
 .tutu-typo-rendered :is(p, span, em, i, strong, b, q, li, blockquote, font) {
     font-family: inherit !important;
     font-size: inherit !important;
     line-height: inherit !important;
-}`;
+}
+/* 捕捉标签：酒馆已渲染成 <p>，用 CSS 实现缩进 / 段距 / 首字放大 / 引号高亮 */
+.tutu-typo-rendered p {
+    margin: 0 0 ${typo.paragraphSpacing}em !important;
+    text-indent: ${typo.textIndent}em !important;
+}
+${typo.dropCap ? `.tutu-typo-rendered > p:first-of-type { text-indent: 0 !important; }
+.tutu-typo-rendered > p:first-of-type::first-letter {
+    float: left;
+    font-size: 2.6em;
+    line-height: 1;
+    font-weight: 700;
+    margin: 0.06em 0.12em 0 0;
+    color: ${sanitizeTutuCssValue(typo.quoteColor) || '#c96f4a'};
+}` : ''}
+${typo.quoteHighlight ? `.tutu-typo-rendered q { color: ${sanitizeTutuCssValue(typo.quoteColor) || '#c96f4a'} !important; }` : ''}
+${buildTutuTypographyStructureCss(typo, '.tutu-typo-formatted')}`;
 }
 
 /**
@@ -3822,8 +4212,23 @@ localStorage.setItem(
                 <label class="tutu-settings-label" for="tutu_typo_line_height">行距</label>
                 <input id="tutu_typo_line_height" class="text_pole" type="number" min="1" max="3" step="0.1">
 
-                <label class="tutu-settings-label" for="tutu_typo_padding">内边距（px）</label>
+                <label class="tutu-settings-label" for="tutu_typo_letter_spacing">字间距（px）</label>
+                <input id="tutu_typo_letter_spacing" class="text_pole" type="number" min="-1" max="8" step="0.5">
+
+                <label class="tutu-settings-label" for="tutu_typo_paragraph_spacing">段间距（em）</label>
+                <input id="tutu_typo_paragraph_spacing" class="text_pole" type="number" min="0" max="3" step="0.1">
+
+                <label class="tutu-settings-label" for="tutu_typo_text_indent">首行缩进（字）</label>
+                <input id="tutu_typo_text_indent" class="text_pole" type="number" min="0" max="4" step="1" placeholder="0 = 不缩进，2 = 空两格">
+
+                <label class="tutu-settings-label" for="tutu_typo_max_width">整体宽度（px）</label>
+                <input id="tutu_typo_max_width" class="text_pole" type="number" min="0" max="2000" step="10" placeholder="0 = 不限，铺满">
+
+                <label class="tutu-settings-label" for="tutu_typo_padding">上下内边距（px）</label>
                 <input id="tutu_typo_padding" class="text_pole" type="number" min="0" max="60" step="1">
+
+                <label class="tutu-settings-label" for="tutu_typo_padding_x">左右边距（px）</label>
+                <input id="tutu_typo_padding_x" class="text_pole" type="number" min="0" max="80" step="1">
 
                 <label class="tutu-settings-label" for="tutu_typo_font_preset">字体</label>
                 <select id="tutu_typo_font_preset" class="text_pole">
@@ -3857,6 +4262,45 @@ localStorage.setItem(
 
                 <label class="tutu-settings-label" for="tutu_typo_bg_image">背景图片链接</label>
                 <input id="tutu_typo_bg_image" class="text_pole" type="text" placeholder="https://...（铺满居中）">
+
+                <label class="tutu-settings-label" for="tutu_typo_quote_color">高亮 / 首字颜色</label>
+                <div class="tutu-typo-color-row">
+                    <input id="tutu_typo_quote_color_picker" type="color" value="#c96f4a" aria-label="选择引号高亮颜色">
+                    <input id="tutu_typo_quote_color" class="text_pole" type="text" placeholder="#c96f4a">
+                </div>
+            </div>
+
+            <div class="tutu-typo-switches">
+                <label class="tutu-history-option">
+                    <input type="checkbox" id="tutu_typo_quote_highlight">
+                    <span>引号高亮（“……”「……」里的话换色）</span>
+                </label>
+                <label class="tutu-history-option">
+                    <input type="checkbox" id="tutu_typo_drop_cap">
+                    <span>首字放大</span>
+                </label>
+                <label class="tutu-history-option">
+                    <input type="checkbox" id="tutu_typo_chat_bubble">
+                    <span>微信聊天自动渲染成气泡</span>
+                </label>
+                <label class="tutu-history-option">
+                    <input type="checkbox" id="tutu_typo_dialogue_block">
+                    <span>对话排版：名字 —— 下一行台词</span>
+                </label>
+            </div>
+
+            <div class="tutu-typo-preset-row">
+                <label class="tutu-settings-label" for="tutu_typo_preset_select">排版预设</label>
+                <select id="tutu_typo_preset_select" class="text_pole">
+                    <option value="">选择预设套用……</option>
+                </select>
+                <button type="button" id="tutu_typo_preset_save_btn" class="menu_button" title="把当前排版保存为预设">
+                    <i class="fa-solid fa-floppy-disk"></i>
+                    保存预设
+                </button>
+                <button type="button" id="tutu_typo_preset_delete_btn" class="menu_button" title="删除选中的预设">
+                    <i class="fa-solid fa-trash"></i>
+                </button>
             </div>
 
             <div class="tutu-appearance-actions">
@@ -5655,8 +6099,8 @@ iframe.srcdoc = rendered.html;
 
         showTutuResultMode('preview');
     } else {
-        const $plain = $('<div class="tutu-plain-preview tutu-typo-plain"></div>');
-        $plain.text(content);
+        const $plain = $('<div class="tutu-plain-preview"></div>');
+        fillTutuPlainText($plain[0], content);
 
         $preview.append($plain);
 
@@ -5986,8 +6430,8 @@ summary.appendChild(embedActions);
          * 纯文本使用 textContent，
          * 不使用 innerHTML，避免文本被当成 HTML 执行。
          */
-        body.textContent = content;
-        body.classList.add('tutu-typo-plain');
+        // fillTutuPlainText 内部全部转义，不会把文本当 HTML 执行
+        fillTutuPlainText(body, content);
     }
 
     details.appendChild(summary);
@@ -6656,8 +7100,8 @@ function openTutuTheaterFullscreen(
     } else {
         const plain = document.createElement('div');
 
-        plain.className = 'tutu-fullscreen-plain tutu-typo-plain';
-        plain.textContent = text;
+        plain.className = 'tutu-fullscreen-plain';
+        fillTutuPlainText(plain, text);
 
         body.appendChild(plain);
     }
@@ -12632,6 +13076,22 @@ function loadTutuTypographyToUI() {
     $('#tutu_typo_text_color').val(typo.textColor || '');
     $('#tutu_typo_bg_color').val(typo.bgColor || '');
     $('#tutu_typo_bg_image').val(typo.bgImage || '');
+    $('#tutu_typo_padding_x').val(typo.paddingX);
+    $('#tutu_typo_letter_spacing').val(typo.letterSpacing);
+    $('#tutu_typo_paragraph_spacing').val(typo.paragraphSpacing);
+    $('#tutu_typo_text_indent').val(typo.textIndent);
+    $('#tutu_typo_max_width').val(typo.maxWidth);
+    $('#tutu_typo_quote_color').val(typo.quoteColor || '');
+    $('#tutu_typo_quote_highlight').prop('checked', Boolean(typo.quoteHighlight));
+    $('#tutu_typo_drop_cap').prop('checked', Boolean(typo.dropCap));
+    $('#tutu_typo_chat_bubble').prop('checked', Boolean(typo.chatBubble));
+    $('#tutu_typo_dialogue_block').prop('checked', Boolean(typo.dialogueBlock));
+
+    if (TUTU_HEX_COLOR.test(typo.quoteColor || '')) {
+        $('#tutu_typo_quote_color_picker').val(typo.quoteColor);
+    }
+
+    renderTutuTypographyPresetOptions();
 
     if (TUTU_HEX_COLOR.test(typo.textColor || '')) {
         $('#tutu_typo_text_color_picker').val(typo.textColor);
@@ -12667,6 +13127,16 @@ function saveTutuTypographyFromUI() {
         textColor: String($('#tutu_typo_text_color').val() || '').trim(),
         bgColor: String($('#tutu_typo_bg_color').val() || '').trim(),
         bgImage: String($('#tutu_typo_bg_image').val() || '').trim(),
+        paddingX: readTutuTypographyNumber('#tutu_typo_padding_x', old.paddingX),
+        letterSpacing: readTutuTypographyNumber('#tutu_typo_letter_spacing', old.letterSpacing),
+        paragraphSpacing: readTutuTypographyNumber('#tutu_typo_paragraph_spacing', old.paragraphSpacing),
+        textIndent: readTutuTypographyNumber('#tutu_typo_text_indent', old.textIndent),
+        maxWidth: readTutuTypographyNumber('#tutu_typo_max_width', old.maxWidth),
+        quoteColor: String($('#tutu_typo_quote_color').val() || '').trim(),
+        quoteHighlight: $('#tutu_typo_quote_highlight').is(':checked'),
+        dropCap: $('#tutu_typo_drop_cap').is(':checked'),
+        chatBubble: $('#tutu_typo_chat_bubble').is(':checked'),
+        dialogueBlock: $('#tutu_typo_dialogue_block').is(':checked'),
     };
 
     persistTutuSettings();
@@ -12681,9 +13151,116 @@ function saveTutuTypographyFromUI() {
 
 $(document).on(
     'input change',
-    '#tutu_typo_enabled, #tutu_typo_font_size, #tutu_typo_line_height, #tutu_typo_padding, #tutu_typo_font_preset, #tutu_typo_font_family, #tutu_typo_font_url, #tutu_typo_text_color, #tutu_typo_bg_color, #tutu_typo_bg_image',
+    '#tutu_typo_enabled, #tutu_typo_font_size, #tutu_typo_line_height, #tutu_typo_padding, #tutu_typo_font_preset, #tutu_typo_font_family, #tutu_typo_font_url, #tutu_typo_text_color, #tutu_typo_bg_color, #tutu_typo_bg_image, '
+        + '#tutu_typo_padding_x, #tutu_typo_letter_spacing, #tutu_typo_paragraph_spacing, #tutu_typo_text_indent, #tutu_typo_max_width, #tutu_typo_quote_color, '
+        + '#tutu_typo_quote_highlight, #tutu_typo_drop_cap, #tutu_typo_chat_bubble, #tutu_typo_dialogue_block',
     saveTutuTypographyFromUI
 );
+
+$(document).on('input change', '#tutu_typo_quote_color_picker', function () {
+    $('#tutu_typo_quote_color').val($(this).val());
+    saveTutuTypographyFromUI();
+});
+
+// ---------- 排版预设 ----------
+function getTutuTypographyPresets() {
+    if (!Array.isArray(tutuSettings.typographyPresets)) {
+        tutuSettings.typographyPresets = [];
+    }
+
+    return tutuSettings.typographyPresets;
+}
+
+function renderTutuTypographyPresetOptions(selectedName = '') {
+    const $select = $('#tutu_typo_preset_select');
+
+    if (!$select.length) return;
+
+    $select.empty().append('<option value="">选择预设套用……</option>');
+
+    getTutuTypographyPresets().forEach(preset => {
+        $('<option>')
+            .val(preset.name)
+            .text(preset.name)
+            .appendTo($select);
+    });
+
+    $select.val(selectedName);
+}
+
+function applyTutuTypographyAll() {
+    persistTutuSettings();
+    loadTutuTypographyToUI();
+    applyTutuTypographyStyle();
+    refreshTutuCurrentRender();
+}
+
+$(document).on('change', '#tutu_typo_preset_select', function () {
+    const name = String($(this).val() || '');
+    const preset = getTutuTypographyPresets().find(item => item.name === name);
+
+    if (!preset) return;
+
+    tutuSettings.typography = {
+        ...getDefaultTutuTypography(),
+        ...preset.typography,
+    };
+
+    applyTutuTypographyAll();
+    renderTutuTypographyPresetOptions(name);
+    toastr.success(`已套用排版预设「${name}」`);
+});
+
+$(document).on('click', '#tutu_typo_preset_save_btn', function () {
+    const current = String($('#tutu_typo_preset_select').val() || '');
+    const input = window.prompt('排版预设名称：', current || '我的排版');
+
+    if (input === null) return;
+
+    const name = input.trim().slice(0, 40);
+
+    if (!name) {
+        toastr.warning('预设名称不能为空');
+        return;
+    }
+
+    const presets = getTutuTypographyPresets();
+    const existing = presets.find(item => item.name === name);
+
+    if (existing && !window.confirm(`预设「${name}」已存在，要覆盖吗？`)) {
+        return;
+    }
+
+    const snapshot = JSON.parse(JSON.stringify(getTutuTypographyState()));
+
+    if (existing) {
+        existing.typography = snapshot;
+    } else {
+        presets.push({ name, typography: snapshot });
+    }
+
+    persistTutuSettings();
+    renderTutuTypographyPresetOptions(name);
+    toastr.success(`已保存排版预设「${name}」`);
+});
+
+$(document).on('click', '#tutu_typo_preset_delete_btn', function () {
+    const name = String($('#tutu_typo_preset_select').val() || '');
+
+    if (!name) {
+        toastr.info('请先在下拉框选择要删除的预设');
+        return;
+    }
+
+    if (!window.confirm(`删除排版预设「${name}」？`)) return;
+
+    tutuSettings.typographyPresets = getTutuTypographyPresets()
+        .filter(item => item.name !== name);
+
+    persistTutuSettings();
+    renderTutuTypographyPresetOptions();
+    toastr.success('预设已删除');
+});
 
 // 取色器与文本框同步
 $(document).on('input change', '#tutu_typo_text_color_picker', function () {
