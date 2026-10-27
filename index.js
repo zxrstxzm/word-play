@@ -9074,7 +9074,7 @@ function refreshTutuNameMaskViews() {
 }
 
 /** 开启 / 关闭某段内容的屏蔽；第一次开启时自动识别名字 */
-function toggleTutuNameMask(text, characterName) {
+function toggleTutuNameMask(text, characterName, anchor = null) {
     const mask = getTutuNameMask(text) || { enabled: false, items: [] };
 
     if (mask.enabled && mask.items.some(item => item.on)) {
@@ -9090,7 +9090,7 @@ function toggleTutuNameMask(text, characterName) {
 
     if (!mask.items.some(item => item.on)) {
         toastr.info('没有识别到名字，请手动添加');
-        openTutuNameMaskEditor(text, characterName);
+        openTutuNameMaskEditor(text, characterName, null, anchor);
         return;
     }
 
@@ -9101,10 +9101,107 @@ function toggleTutuNameMask(text, characterName) {
     toastr.success(`已屏蔽 ${names} 个名字，点「设置名字 / 图片」可以改名单或换成图片`);
 }
 
-function openTutuNameMaskEditor(content, characterName = '', onChange = null) {
+/** 找到面板对应的按钮：收藏重新渲染后原按钮会被替换，用选择器重新找 */
+function getTutuNameMaskAnchor() {
+    const state = tutuNameMaskEditor;
+
+    if (!state) return null;
+    if (state.anchor?.isConnected) return state.anchor;
+
+    const found = state.anchorSelector ? document.querySelector(state.anchorSelector) : null;
+
+    if (found) state.anchor = found;
+
+    return found;
+}
+
+function positionTutuNameMaskEditor() {
+    positionTutuPopover(document.getElementById('tutu_name_mask_editor'), getTutuNameMaskAnchor());
+}
+
+/** 手机等窄屏：浮动面板改为底部弹出 */
+function isTutuSheetLayout() {
+    return window.matchMedia('(max-width: 600px), (pointer: coarse) and (max-height: 500px)').matches;
+}
+
+/** 把浮动面板放在按钮下方；下方放不下就放上方，左右不超出屏幕 */
+function positionTutuPopover(modal, anchor) {
+    if (!modal) return;
+
+    const gap = 6;
+    const margin = 8;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+
+    modal.style.maxHeight = '';
+
+    // 手机：改成从底部弹出的面板，手指好点，键盘弹出时跟着可视区域上移
+    if (isTutuSheetLayout()) {
+        const view = window.visualViewport;
+        const viewHeight = view ? view.height : vh;
+        const viewBottom = view ? view.offsetTop + view.height : vh;
+
+        modal.dataset.placement = 'sheet';
+        modal.style.left = '0px';
+        modal.style.top = 'auto';
+        modal.style.bottom = `${Math.max(0, vh - viewBottom)}px`;
+        modal.style.maxHeight = `${Math.round(Math.max(200, viewHeight * 0.85))}px`;
+        modal.style.removeProperty('--tutu-mask-arrow-x');
+        return;
+    }
+
+    modal.style.bottom = 'auto';
+
+    // 找不到按钮时居中
+    if (!anchor) {
+        const w = modal.offsetWidth;
+        const h = Math.min(modal.offsetHeight, vh - margin * 2);
+        modal.style.left = `${Math.max(margin, (vw - w) / 2)}px`;
+        modal.style.top = `${Math.max(margin, (vh - h) / 2)}px`;
+        modal.style.maxHeight = `${vh - margin * 2}px`;
+        modal.dataset.placement = 'center';
+        return;
+    }
+
+    const rect = anchor.getBoundingClientRect();
+    const below = vh - rect.bottom - gap - margin;
+    const above = rect.top - gap - margin;
+    const natural = modal.scrollHeight;
+    const placeBelow = below >= Math.min(natural, 260) || below >= above;
+    const room = Math.max(160, placeBelow ? below : above);
+    const height = Math.min(natural, room);
+
+    modal.style.maxHeight = `${room}px`;
+
+    const w = modal.offsetWidth;
+    let left = rect.left;
+
+    if (left + w > vw - margin) left = vw - margin - w;
+    left = Math.max(margin, left);
+
+    const top = placeBelow
+        ? Math.min(rect.bottom + gap, vh - margin - height)
+        : Math.max(margin, rect.top - gap - height);
+
+    modal.style.left = `${left}px`;
+    modal.style.top = `${top}px`;
+    modal.dataset.placement = placeBelow ? 'below' : 'above';
+
+    // 箭头对准按钮中间
+    const arrow = Math.min(Math.max(rect.left + rect.width / 2 - left, 14), w - 14);
+    modal.style.setProperty('--tutu-mask-arrow-x', `${arrow}px`);
+}
+
+function openTutuNameMaskEditor(content, characterName = '', onChange = null, anchor = null) {
     const text = normalizeTutuPlainSource(content);
 
     if (!text) return;
+
+    // 再点同一个按钮：收起
+    if (anchor && tutuNameMaskEditor?.anchor === anchor && document.getElementById('tutu_name_mask_editor')) {
+        closeTutuNameMaskEditor();
+        return;
+    }
 
     closeTutuNameMaskEditor();
 
@@ -9116,13 +9213,27 @@ function openTutuNameMaskEditor(content, characterName = '', onChange = null) {
         });
     }
 
-    tutuNameMaskEditor = { text, characterName, onChange };
+    // 收藏卡片的按钮会随重新渲染被替换，记下选择器以便重新定位
+    let anchorSelector = '';
+    const cardId = anchor?.closest?.('.tutu-favorite-card')?.dataset.id;
+
+    if (cardId && anchor.classList.contains('tutu-favorite-mask-edit')) {
+        anchorSelector = `.tutu-favorite-card[data-id="${CSS.escape(cardId)}"] .tutu-favorite-mask-edit`;
+    } else if (cardId && anchor.classList.contains('tutu-favorite-mask-btn')) {
+        anchorSelector = `.tutu-favorite-card[data-id="${CSS.escape(cardId)}"] .tutu-favorite-mask-edit, .tutu-favorite-card[data-id="${CSS.escape(cardId)}"] .tutu-favorite-mask-btn`;
+    } else if (anchor?.closest?.('#tutu_export_dialog')) {
+        anchorSelector = '#tutu_export_dialog .tutu-export-mask-edit';
+    }
+
+    tutuNameMaskEditor = { text, characterName, onChange, anchor, anchorSelector };
+
+    if (anchor) anchor.setAttribute('aria-expanded', 'true');
 
     const modal = document.createElement('div');
     modal.id = 'tutu_name_mask_editor';
-    modal.className = 'tutu-dialogue-editor-overlay';
+    modal.className = 'tutu-name-mask-popover';
     modal.innerHTML = `
-        <div class="tutu-dialogue-editor tutu-name-mask-editor" role="dialog" aria-modal="true" aria-label="屏蔽名字">
+        <div class="tutu-dialogue-editor tutu-name-mask-editor" role="dialog" aria-label="屏蔽名字">
             <div class="tutu-dialogue-editor-head">
                 <div class="tutu-dialogue-editor-title">
                     <i class="fa-solid fa-user-secret"></i>
@@ -9159,17 +9270,44 @@ function openTutuNameMaskEditor(content, characterName = '', onChange = null) {
 
     document.body.appendChild(modal);
     renderTutuNameMaskEditor();
+    positionTutuNameMaskEditor();
 
-    modal.querySelector('.tutu-name-mask-done').focus();
+    modal.querySelector('.tutu-name-mask-done').focus({ preventScroll: true });
 
     modal._tutuEscHandler = event => {
         if (event.key === 'Escape') {
             event.stopPropagation();
+            const back = getTutuNameMaskAnchor();
             closeTutuNameMaskEditor();
+            back?.focus?.({ preventScroll: true });
         }
     };
 
+    // 点面板外面收起（点按钮本身由按钮自己处理）
+    modal._tutuOutsideHandler = event => {
+        const target = event.target;
+
+        if (modal.contains(target)) return;
+
+        const anchorNow = getTutuNameMaskAnchor();
+
+        if (anchorNow && anchorNow.contains(target)) return;
+        if (target.closest?.('.tutu-favorite-mask-edit, .tutu-export-mask-edit')) return;
+
+        closeTutuNameMaskEditor();
+    };
+
+    // 滚动 / 缩放时跟着按钮走
+    modal._tutuReposition = event => {
+        if (event?.target instanceof Node && modal.contains(event.target)) return;
+        requestAnimationFrame(positionTutuNameMaskEditor);
+    };
+
     document.addEventListener('keydown', modal._tutuEscHandler, true);
+    document.addEventListener('pointerdown', modal._tutuOutsideHandler, true);
+    window.addEventListener('resize', modal._tutuReposition);
+    window.visualViewport?.addEventListener('resize', modal._tutuReposition);
+    document.addEventListener('scroll', modal._tutuReposition, true);
 }
 
 function closeTutuNameMaskEditor() {
@@ -9177,9 +9315,14 @@ function closeTutuNameMaskEditor() {
 
     if (modal) {
         document.removeEventListener('keydown', modal._tutuEscHandler, true);
+        document.removeEventListener('pointerdown', modal._tutuOutsideHandler, true);
+        window.removeEventListener('resize', modal._tutuReposition);
+        window.visualViewport?.removeEventListener('resize', modal._tutuReposition);
+        document.removeEventListener('scroll', modal._tutuReposition, true);
         modal.remove();
     }
 
+    tutuNameMaskEditor?.anchor?.setAttribute?.('aria-expanded', 'false');
     tutuNameMaskEditor = null;
 }
 
@@ -9241,6 +9384,7 @@ function updateTutuNameMaskItems(patch) {
     renderTutuNameMaskEditor();
     refreshTutuNameMaskViews();
     tutuNameMaskEditor?.onChange?.();
+    positionTutuNameMaskEditor();
 }
 
 $(document).on('click', '.tutu-favorite-mask-btn', function (event) {
@@ -9254,7 +9398,7 @@ $(document).on('click', '.tutu-favorite-mask-btn', function (event) {
         return;
     }
 
-    toggleTutuNameMask(favorite.content, favorite.characterName);
+    toggleTutuNameMask(favorite.content, favorite.characterName, this);
 });
 
 $(document).on('keydown', '.tutu-favorite-mask-btn', function (event) {
@@ -9270,11 +9414,7 @@ $(document).on('click', '.tutu-favorite-mask-edit', function (event) {
     const id = String($(this).closest('.tutu-favorite-card').data('id'));
     const favorite = loadTutuFavorites().find(item => String(item.id) === id);
 
-    if (favorite) openTutuNameMaskEditor(favorite.content, favorite.characterName);
-});
-
-$(document).on('click', '#tutu_name_mask_editor', function (event) {
-    if (event.target === this) closeTutuNameMaskEditor();
+    if (favorite) openTutuNameMaskEditor(favorite.content, favorite.characterName, null, this);
 });
 
 $(document).on('click', '#tutu_name_mask_editor .tutu-name-mask-done', closeTutuNameMaskEditor);
@@ -9415,93 +9555,130 @@ function getTutuExportOptions() {
     };
 }
 
+// 记下最近点过的按钮：导出菜单没传按钮时就浮在它下面
+let tutuLastPressedButton = null;
+
+document.addEventListener('pointerdown', event => {
+    const button = event.target?.closest?.('button, .menu_button, [role="button"], .fa-solid, .fa-regular');
+
+    if (button && !button.closest('#tutu_export_dialog, #tutu_name_mask_editor')) {
+        tutuLastPressedButton = button.closest('button, .menu_button, [role="button"]') || button;
+    }
+}, true);
+
 function openTutuExportDialog(text, characterName, options = {}) {
+    let anchor = options.anchor || null;
+
+    if (!anchor && tutuLastPressedButton?.isConnected) anchor = tutuLastPressedButton;
+
+    // 再点同一个导出按钮：收起菜单
+    if (anchor && tutuExportDialogState?.anchor === anchor && document.getElementById('tutu_export_dialog')) {
+        closeTutuExportDialog();
+        return;
+    }
+
     closeTutuExportDialog();
 
     const isHtml = isProbablyHtml(text);
     const saved = getTutuExportOptions();
     const maskNames = typeof options.maskNames === 'boolean' ? options.maskNames : saved.maskNames;
 
-    tutuExportDialogState = { text, characterName, isHtml };
+    tutuExportDialogState = { text, characterName, isHtml, anchor };
+
+    if (anchor) anchor.setAttribute('aria-expanded', 'true');
 
     const formats = isHtml
-        ? [{ value: 'html', icon: 'fa-code', label: 'HTML 文件', desc: 'HTML 小剧场按原样导出，交互效果保留' }]
+        ? [{ value: 'html', icon: 'fa-code', label: 'HTML 文件', desc: '按原样导出，交互效果保留' }]
         : TUTU_EXPORT_FORMATS;
-    const format = isHtml ? 'html' : saved.format;
+    const lastFormat = isHtml ? 'html' : saved.format;
 
     const modal = document.createElement('div');
     modal.id = 'tutu_export_dialog';
-    modal.className = 'tutu-dialogue-editor-overlay';
+    modal.className = 'tutu-name-mask-popover tutu-export-popover';
     modal.innerHTML = `
-        <div class="tutu-dialogue-editor tutu-export-dialog" role="dialog" aria-modal="true" aria-label="导出小剧场">
-            <div class="tutu-dialogue-editor-head">
-                <div class="tutu-dialogue-editor-title">
-                    <i class="fa-solid fa-file-export"></i>
-                    导出小剧场
-                </div>
-                <div class="tutu-dialogue-editor-actions">
-                    <button type="button" class="menu_button margin0 tutu-export-cancel" title="关闭">
-                        <i class="fa-solid fa-xmark"></i>
-                    </button>
-                </div>
+        <div class="tutu-dialogue-editor tutu-export-dialog" role="menu" aria-label="导出为">
+            <div class="tutu-export-menu-title">
+                <i class="fa-solid fa-file-export" aria-hidden="true"></i>
+                导出为
             </div>
 
-            <div class="tutu-export-section-label" id="tutu_export_format_label">格式</div>
-            <div class="tutu-export-formats" role="radiogroup" aria-labelledby="tutu_export_format_label">
+            <div class="tutu-export-formats">
                 ${formats.map(item => `
-                    <label class="tutu-export-format${item.value === format ? ' active' : ''}">
-                        <input type="radio" name="tutu_export_format" value="${item.value}"${item.value === format ? ' checked' : ''}>
+                    <button type="button" role="menuitem" class="tutu-export-format${item.value === lastFormat ? ' last' : ''}" data-format="${item.value}">
                         <i class="fa-solid ${item.icon}" aria-hidden="true"></i>
                         <span class="tutu-export-format-text">
-                            <strong>${item.label}</strong>
+                            <strong>${item.label}${item.value === lastFormat ? ' <em>上次</em>' : ''}</strong>
                             <small>${item.desc}</small>
                         </span>
-                    </label>`).join('')}
+                    </button>`).join('')}
             </div>
 
-            ${isHtml ? '' : `
-            <label class="tutu-export-option tutu-export-keep">
-                <input type="checkbox" class="tutu-export-keep-style"${saved.keepStyle ? ' checked' : ''}>
-                <span>
-                    <strong>保留气泡、背景和排版样式</strong>
-                    <small>按「排版美化」的字体、颜色、背景、对话 / 聊天气泡导出；关掉就是素净的白底文字</small>
-                </span>
-            </label>`}
+            <div class="tutu-export-options">
+                ${isHtml ? '' : `
+                <label class="tutu-export-option tutu-export-keep">
+                    <input type="checkbox" class="tutu-export-keep-style"${saved.keepStyle ? ' checked' : ''}>
+                    <span>
+                        <strong>保留气泡、背景和排版</strong>
+                        <small>长图、网页按「排版美化」导出；关掉为白底文字</small>
+                    </span>
+                </label>`}
 
-            <label class="tutu-export-option">
-                <input type="checkbox" class="tutu-export-mask"${maskNames ? ' checked' : ''}>
-                <span>
-                    <strong>屏蔽名字</strong>
-                    <small class="tutu-export-mask-summary"></small>
-                </span>
-            </label>
-            <button type="button" class="menu_button margin0 tutu-export-mask-edit">
-                <i class="fa-solid fa-user-secret"></i>
-                <span>设置要屏蔽的名字 / 替换图片</span>
-            </button>
-
-            <div class="tutu-export-foot">
-                <button type="button" class="menu_button margin0 tutu-export-cancel">取消</button>
-                <button type="button" class="menu_button margin0 tutu-export-go">
-                    <i class="fa-solid fa-download"></i>
-                    <span>导出</span>
-                </button>
+                <div class="tutu-export-mask-line">
+                    <label class="tutu-export-option">
+                        <input type="checkbox" class="tutu-export-mask"${maskNames ? ' checked' : ''}>
+                        <span>
+                            <strong>屏蔽名字</strong>
+                            <small class="tutu-export-mask-summary"></small>
+                        </span>
+                    </label>
+                    <button type="button" class="menu_button margin0 tutu-export-mask-edit" title="设置要屏蔽的名字 / 替换图片" aria-haspopup="dialog">
+                        <i class="fa-solid fa-gear"></i>
+                    </button>
+                </div>
             </div>
         </div>`;
 
     document.body.appendChild(modal);
     updateTutuExportDialog();
+    positionTutuPopover(modal, anchor);
 
-    modal.querySelector('.tutu-export-go').focus();
+    modal.querySelector('.tutu-export-format.last, .tutu-export-format')?.focus({ preventScroll: true });
 
     modal._tutuEscHandler = event => {
         if (event.key === 'Escape' && !document.getElementById('tutu_name_mask_editor')) {
             event.stopPropagation();
+            const back = tutuExportDialogState?.anchor;
             closeTutuExportDialog();
+            back?.focus?.({ preventScroll: true });
         }
     };
 
+    // 点菜单外面收起；屏蔽设置面板、按钮本身除外
+    modal._tutuOutsideHandler = event => {
+        const target = event.target;
+
+        if (modal.contains(target)) return;
+        if (target.closest?.('#tutu_name_mask_editor')) return;
+        if (anchor && anchor.contains(target)) return;
+
+        closeTutuExportDialog();
+    };
+
+    modal._tutuReposition = event => {
+        if (event?.target instanceof Node && (modal.contains(event.target) || document.getElementById('tutu_name_mask_editor')?.contains(event.target))) return;
+
+        requestAnimationFrame(() => {
+            const state = tutuExportDialogState;
+            positionTutuPopover(modal, state?.anchor?.isConnected ? state.anchor : null);
+            positionTutuNameMaskEditor();
+        });
+    };
+
     document.addEventListener('keydown', modal._tutuEscHandler, true);
+    document.addEventListener('pointerdown', modal._tutuOutsideHandler, true);
+    window.addEventListener('resize', modal._tutuReposition);
+    window.visualViewport?.addEventListener('resize', modal._tutuReposition);
+    document.addEventListener('scroll', modal._tutuReposition, true);
 }
 
 function closeTutuExportDialog() {
@@ -9509,9 +9686,17 @@ function closeTutuExportDialog() {
 
     if (modal) {
         document.removeEventListener('keydown', modal._tutuEscHandler, true);
+        document.removeEventListener('pointerdown', modal._tutuOutsideHandler, true);
+        window.removeEventListener('resize', modal._tutuReposition);
+        window.visualViewport?.removeEventListener('resize', modal._tutuReposition);
+        document.removeEventListener('scroll', modal._tutuReposition, true);
         modal.remove();
+
+        // 屏蔽设置是从导出菜单打开的，一起收起
+        if (tutuNameMaskEditor?.anchorSelector?.startsWith('#tutu_export_dialog')) closeTutuNameMaskEditor();
     }
 
+    tutuExportDialogState?.anchor?.setAttribute?.('aria-expanded', 'false');
     tutuExportDialogState = null;
 }
 
@@ -9521,39 +9706,16 @@ function updateTutuExportDialog() {
 
     if (!modal || !tutuExportDialogState) return;
 
-    const format = modal.querySelector('input[name="tutu_export_format"]:checked')?.value || '';
-
-    modal.querySelectorAll('.tutu-export-format').forEach(label => {
-        label.classList.toggle('active', label.querySelector('input').checked);
-    });
-
-    const keep = modal.querySelector('.tutu-export-keep');
-
-    if (keep) {
-        const disabled = format === 'text' || format === 'quote';
-        keep.classList.toggle('disabled', disabled);
-        keep.querySelector('input').disabled = disabled;
-        keep.title = disabled ? 'TXT 和书摘图片有自己的样式，不使用排版美化' : '';
-    }
-
     const items = getTutuCheckedMaskItems(tutuExportDialogState.text);
     const masked = modal.querySelector('.tutu-export-mask').checked;
     const summary = modal.querySelector('.tutu-export-mask-summary');
     const images = items.filter(item => item.image).length;
 
     summary.textContent = items.length
-        ? `${masked ? '将屏蔽' : '可屏蔽'}：${items.map(item => item.name).slice(0, 5).join('、')}${items.length > 5 ? ` 等 ${items.length} 个` : ''}`
-            + `（${images ? `${images} 个换成图片，` : ''}${format === 'text' || format === 'quote' ? '文字里换成 ■' : '其余打马赛克'}）`
+        ? `${masked ? '将屏蔽' : '可屏蔽'}：${items.map(item => item.name).slice(0, 4).join('、')}${items.length > 4 ? ` 等 ${items.length} 个` : ''}`
+            + (images ? `（${images} 个换成图片）` : '')
         : '还没有名单，勾选时自动识别';
 }
-
-$(document).on('click', '#tutu_export_dialog', function (event) {
-    if (event.target === this) closeTutuExportDialog();
-});
-
-$(document).on('click', '#tutu_export_dialog .tutu-export-cancel', closeTutuExportDialog);
-
-$(document).on('change', '#tutu_export_dialog input[name="tutu_export_format"]', updateTutuExportDialog);
 
 $(document).on('change', '#tutu_export_dialog .tutu-export-mask', function () {
     const state = tutuExportDialogState;
@@ -9569,7 +9731,8 @@ $(document).on('change', '#tutu_export_dialog .tutu-export-mask', function () {
             });
         } else {
             toastr.info('没有识别到名字，请手动添加');
-            openTutuNameMaskEditor(state.text, state.characterName, updateTutuExportDialog);
+            openTutuNameMaskEditor(state.text, state.characterName, updateTutuExportDialog,
+                document.querySelector('#tutu_export_dialog .tutu-export-mask-edit'));
         }
     }
 
@@ -9582,23 +9745,24 @@ $(document).on('click', '#tutu_export_dialog .tutu-export-mask-edit', function (
     if (!state) return;
 
     $('#tutu_export_dialog .tutu-export-mask').prop('checked', true);
-    openTutuNameMaskEditor(state.text, state.characterName, updateTutuExportDialog);
+    openTutuNameMaskEditor(state.text, state.characterName, updateTutuExportDialog, this);
     updateTutuExportDialog();
 });
 
-$(document).on('click', '#tutu_export_dialog .tutu-export-go', async function () {
+// 点格式直接导出
+$(document).on('click', '#tutu_export_dialog .tutu-export-format', async function () {
     const modal = document.getElementById('tutu_export_dialog');
     const state = tutuExportDialogState;
 
     if (!modal || !state) return;
 
-    const format = modal.querySelector('input[name="tutu_export_format"]:checked')?.value || 'text';
+    const format = this.dataset.format || 'text';
     const keepStyle = modal.querySelector('.tutu-export-keep-style')?.checked !== false;
     const maskNames = modal.querySelector('.tutu-export-mask').checked;
     const items = maskNames ? getTutuCheckedMaskItems(state.text) : [];
 
     if (maskNames && !items.length) {
-        toastr.warning('勾选了屏蔽名字，但名单是空的：点「设置要屏蔽的名字」添加');
+        toastr.warning('勾选了屏蔽名字，但名单是空的：点旁边的齿轮添加名字');
         return;
     }
 
@@ -9607,8 +9771,9 @@ $(document).on('click', '#tutu_export_dialog .tutu-export-go', async function ()
         persistTutuSettings();
     }
 
-    const button = this;
-    button.disabled = true;
+    const buttons = modal.querySelectorAll('.tutu-export-format');
+    buttons.forEach(item => { item.disabled = true; });
+    this.classList.add('busy');
 
     try {
         await runTutuExport(state.text, state.characterName, { format, keepStyle, items });
@@ -9617,7 +9782,8 @@ $(document).on('click', '#tutu_export_dialog .tutu-export-go', async function ()
         console.error('[克制放映室] 导出失败：', error);
         toastr.error(error?.message || '导出失败');
     } finally {
-        if (button.isConnected) button.disabled = false;
+        buttons.forEach(item => { if (item.isConnected) item.disabled = false; });
+        this.classList.remove('busy');
     }
 });
 

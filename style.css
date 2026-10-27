@@ -2007,8 +2007,73 @@
     outline-offset: 2px;
 }
 
+/* ---- 浮在按钮下方的面板（屏蔽设置、导出菜单） ---- */
+.tutu-name-mask-popover {
+    position: fixed;
+    top: 0;
+    left: 0;
+    /* 比全屏查看、所有弹窗都高，避免被挡住 */
+    z-index: 2147483600;
+    display: flex;
+    width: min(440px, calc(100vw - 16px));
+    max-height: calc(100vh - 16px);
+    box-sizing: border-box;
+}
+
+#tutu_name_mask_editor {
+    /* 从导出菜单打开时盖在导出菜单上面 */
+    z-index: 2147483640;
+}
+
+.tutu-name-mask-popover > .tutu-dialogue-editor {
+    position: relative;
+    width: 100%;
+    max-height: 100%;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.45);
+}
+
+/* 小三角对准按钮 */
+.tutu-name-mask-popover[data-placement="below"]::before,
+.tutu-name-mask-popover[data-placement="above"]::before {
+    content: '';
+    position: absolute;
+    left: var(--tutu-mask-arrow-x, 20px);
+    z-index: 1;
+    width: 10px;
+    height: 10px;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.2));
+    background: var(--SmartThemeBlurTintColor, rgba(24, 24, 28, 0.97));
+    transform: translateX(-50%) rotate(45deg);
+    pointer-events: none;
+}
+
+.tutu-name-mask-popover[data-placement="below"]::before {
+    top: -5px;
+    border-right: 0;
+    border-bottom: 0;
+}
+
+.tutu-name-mask-popover[data-placement="above"]::before {
+    bottom: -5px;
+    border-top: 0;
+    border-left: 0;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+    .tutu-name-mask-popover {
+        animation: tutu-popover-in 0.12s ease-out;
+    }
+}
+
+@keyframes tutu-popover-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: none; }
+}
+
 .tutu-name-mask-editor {
-    width: min(560px, 100%);
+    width: 100%;
 }
 
 .tutu-name-mask-switch {
@@ -2088,142 +2153,262 @@
     margin: 0 !important;
 }
 
-/* ---- 导出面板 ---- */
-.tutu-export-dialog {
-    width: min(520px, 100%);
-    overflow-y: auto;
+/* ---- 导出菜单（浮在导出按钮下方，点格式直接导出） ---- */
+.tutu-export-popover {
+    width: min(320px, calc(100vw - 16px));
 }
 
-.tutu-export-section-label {
+.tutu-export-dialog {
+    gap: 4px;
+    padding: 6px;
+}
+
+.tutu-export-menu-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 6px 2px;
     font-size: 0.8em;
     opacity: 0.7;
 }
 
 .tutu-export-formats {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
 }
 
 .tutu-export-format {
-    position: relative;
     display: flex;
     align-items: flex-start;
-    gap: 8px;
-    padding: 8px 10px;
-    border: 1px solid var(--SmartThemeBorderColor);
-    border-radius: 8px;
+    gap: 10px;
+    width: 100%;
+    margin: 0;
+    padding: 7px 8px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
     cursor: pointer;
 }
 
-.tutu-export-format input {
-    position: absolute;
-    opacity: 0;
-    pointer-events: none;
-}
-
 .tutu-export-format > i {
+    width: 1.1em;
     margin-top: 3px;
+    text-align: center;
     opacity: 0.75;
 }
 
-.tutu-export-format.active {
-    border-color: var(--SmartThemeQuoteColor, #c96f4a);
-    background: color-mix(in srgb, var(--SmartThemeQuoteColor, #c96f4a) 14%, transparent);
+.tutu-export-format:hover,
+.tutu-export-format:focus-visible {
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor, #c96f4a) 16%, transparent);
+    outline: none;
 }
 
-.tutu-export-format.active > i {
+.tutu-export-format:focus-visible {
+    box-shadow: inset 0 0 0 2px var(--SmartThemeQuoteColor, #c96f4a);
+}
+
+.tutu-export-format:hover > i,
+.tutu-export-format:focus-visible > i {
     color: var(--SmartThemeQuoteColor, #c96f4a);
     opacity: 1;
 }
 
-.tutu-export-format:has(input:focus-visible) {
-    outline: 2px solid var(--SmartThemeQuoteColor, #c96f4a);
-    outline-offset: 1px;
+.tutu-export-format strong em {
+    margin-left: 4px;
+    padding: 0 5px;
+    border-radius: 4px;
+    background: rgba(127, 127, 127, 0.2);
+    font-size: 0.72em;
+    font-style: normal;
+    font-weight: 400;
+    vertical-align: 1px;
+}
+
+.tutu-export-format:disabled {
+    cursor: wait;
+    opacity: 0.5;
+}
+
+.tutu-export-format.busy {
+    opacity: 1;
+}
+
+.tutu-export-format.busy > i::before {
+    content: '\f110';
+}
+
+.tutu-export-format.busy > i {
+    animation: fa-spin 1s linear infinite;
 }
 
 .tutu-export-format-text,
 .tutu-export-option > span {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 1px;
     min-width: 0;
+}
+
+.tutu-export-format-text strong {
+    font-size: 0.92em;
 }
 
 .tutu-export-format-text small,
 .tutu-export-option small {
-    font-size: 0.75em;
-    opacity: 0.65;
+    font-size: 0.74em;
+    opacity: 0.62;
     line-height: 1.4;
+}
+
+.tutu-export-options {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: 2px;
+    padding: 4px 4px 2px;
+    border-top: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.15));
 }
 
 .tutu-export-option {
     display: flex;
+    flex: 1 1 auto;
     align-items: flex-start;
     gap: 8px;
-    padding: 8px 2px 0;
-    font-size: 0.9em;
+    min-width: 0;
+    padding: 5px 4px;
+    font-size: 0.86em;
     cursor: pointer;
 }
 
 .tutu-export-option input {
-    margin-top: 3px;
+    flex: none;
+    margin: 3px 0 0;
 }
 
-.tutu-export-option.disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
+.tutu-export-mask-line {
+    display: flex;
+    align-items: center;
+    gap: 4px;
 }
 
 .tutu-export-mask-edit {
     display: inline-flex;
+    flex: none;
     align-items: center;
-    gap: 6px;
-    align-self: flex-start;
-    margin-left: 24px !important;
-    padding: 4px 10px;
-    font-size: 0.82em;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0 !important;
 }
 
-.tutu-export-foot {
-    display: flex;
-    justify-content: flex-end;
-    gap: 6px;
-    padding-top: 8px;
-    border-top: 1px solid var(--SmartThemeBorderColor);
+.tutu-export-mask-edit[aria-expanded="true"] {
+    color: var(--SmartThemeQuoteColor, #c96f4a);
+    border-color: var(--SmartThemeQuoteColor, #c96f4a);
 }
 
-.tutu-export-foot .menu_button {
-    display: inline-flex;
+/* ---- 手机：浮动面板改成底部弹出 ---- */
+.tutu-name-mask-popover[data-placement="sheet"] {
+    right: 0;
+    width: 100vw;
+    max-width: none;
+    padding: 0;
+    animation-name: tutu-sheet-in;
+}
+
+.tutu-name-mask-popover[data-placement="sheet"] > .tutu-dialogue-editor {
+    border-bottom: 0;
+    border-radius: 14px 14px 0 0;
+    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+    /* 第二层阴影把后面的页面（含下层面板）压暗，分清层次 */
+    box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.45), 0 0 0 100vmax rgba(0, 0, 0, 0.4);
+}
+
+.tutu-name-mask-popover[data-placement="sheet"] > .tutu-dialogue-editor {
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+}
+
+/* 从导出菜单打开屏蔽设置时，先把导出菜单藏起来，免得两层叠在一起透出文字 */
+body:has(#tutu_name_mask_editor[data-placement="sheet"]) #tutu_export_dialog[data-placement="sheet"] {
+    visibility: hidden;
+}
+
+/* 顶部小横条，提示这是弹出面板 */
+.tutu-name-mask-popover[data-placement="sheet"] > .tutu-dialogue-editor::before {
+    content: '';
+    flex: none;
+    align-self: center;
+    width: 36px;
+    height: 4px;
+    margin: 6px 0 2px;
+    border-radius: 2px;
+    background: rgba(127, 127, 127, 0.45);
+}
+
+@keyframes tutu-sheet-in {
+    from { transform: translateY(24px); opacity: 0; }
+    to { transform: none; opacity: 1; }
+}
+
+.tutu-name-mask-popover[data-placement="sheet"] .tutu-export-format {
+    min-height: 48px;
+    padding: 10px 10px;
     align-items: center;
-    gap: 6px;
-    padding: 6px 14px;
 }
 
-.tutu-export-go {
-    border-color: var(--SmartThemeQuoteColor, #c96f4a) !important;
-    color: var(--SmartThemeQuoteColor, #c96f4a) !important;
-    font-weight: 600;
+.tutu-name-mask-popover[data-placement="sheet"] .tutu-export-format > i {
+    margin-top: 0;
+    font-size: 1.1em;
 }
 
-.tutu-export-go:disabled {
-    opacity: 0.5;
-    cursor: wait;
+.tutu-name-mask-popover[data-placement="sheet"] .tutu-export-option {
+    min-height: 40px;
+    align-items: center;
+}
+
+.tutu-name-mask-popover[data-placement="sheet"] .tutu-export-option input {
+    width: 18px;
+    height: 18px;
+    margin-top: 0;
+}
+
+.tutu-name-mask-popover[data-placement="sheet"] .tutu-export-mask-edit {
+    width: 44px;
+    height: 44px;
 }
 
 @media (max-width: 600px) {
-    .tutu-export-formats {
-        grid-template-columns: 1fr;
-    }
-
     .tutu-name-mask-row-actions {
         margin-left: 0;
         width: 100%;
     }
 
-    .tutu-name-mask-row-actions .menu_button span,
-    .tutu-export-foot .menu_button span {
-        display: inline;
+    .tutu-name-mask-row-actions .menu_button,
+    .tutu-name-mask-add .menu_button,
+    .tutu-name-mask-editor .tutu-dialogue-editor-actions .menu_button {
+        min-height: 40px;
+        padding: 6px 12px;
+    }
+
+    .tutu-name-mask-add input {
+        min-height: 40px;
+        /* 小于 16px 时 iOS 会自动放大页面 */
+        font-size: 16px;
+    }
+
+    .tutu-name-mask-check input,
+    .tutu-name-mask-switch input {
+        width: 18px;
+        height: 18px;
+    }
+
+    .tutu-name-mask-check,
+    .tutu-name-mask-switch {
+        min-height: 36px;
     }
 }
 
