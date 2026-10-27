@@ -1,4 +1,4 @@
-# 兔兔小剧场 项目规则
+# 克制放映室 项目规则
 
 - 项目：SillyTavern 第三方扩展，入口 `index.js`，样式 `style.css`，元数据 `manifest.json`。
 - 每次修改代码后必须同步更新：

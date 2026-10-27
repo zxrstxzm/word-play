@@ -1251,6 +1251,19 @@ const preview =
                                     <i class="fa-solid fa-pen"></i>
                                 </div>
 
+${isHtmlFavorite ? '' : `
+<div
+    class="
+        menu_button
+        margin0
+        tutu-favorite-bubble-btn
+    "
+    role="button"
+    tabindex="0"
+    title="修正气泡：改说话人、对话 / 聊天气泡 / 普通引用（正文里双击也能改）">
+    <i class="fa-solid fa-comment-dots"></i>
+</div>`}
+
 <div
     class="
         menu_button
@@ -2034,6 +2047,35 @@ function buildTutuRenderedContent(content, scenarioId) {
     return { html, isHtml: true };
 }
 
+/**
+ * iframe 里的结构化排版：双击时把位置和行号报给外层，外层弹出修正菜单。
+ * iframe 没有 allow-same-origin，外层无法直接监听里面的事件。
+ */
+const TUTU_IFRAME_DBLCLICK_SCRIPT = `<script>
+(function () {
+    document.addEventListener('dblclick', function (event) {
+        var block = event.target.closest && event.target.closest('[data-tutu-line][data-tutu-src]');
+        if (!block) return;
+        event.preventDefault();
+        try { window.getSelection().removeAllRanges(); } catch (e) {}
+        var nameEl = block.querySelector('.tutu-dialogue-name, .tutu-chat-name');
+        var onName = Boolean(event.target.closest('.tutu-dialogue-name, .tutu-chat-name, .tutu-chat-avatar'));
+        parent.postMessage({
+            type: 'tutu-theater-line-dblclick',
+            src: block.getAttribute('data-tutu-src'),
+            line: Number(block.getAttribute('data-tutu-line')),
+            x: event.clientX,
+            y: event.clientY,
+            onName: onName,
+            name: nameEl ? nameEl.textContent : '',
+            kind: block.classList.contains('tutu-dialogue') ? 'speech'
+                : block.classList.contains('tutu-chat-row') ? 'chat'
+                : block.querySelector('.tutu-emph') ? 'emph' : 'plain'
+        }, '*');
+    });
+})();
+<\/script>`;
+
 function buildTutuRenderedDocument(replaced, styleTag, isHtml, regexChanged, formatPlain = false) {
     let html;
 
@@ -2069,7 +2111,7 @@ body { margin: 0; padding: 12px; white-space: pre-wrap; word-break: break-word; 
 </style>
 ${styleTag}
 </head>
-<body class="tutu-render-body${formatPlain ? ' tutu-typo-formatted' : ''}">${body}</body>
+<body class="tutu-render-body${formatPlain ? ' tutu-typo-formatted' : ''}">${body}${formatPlain ? TUTU_IFRAME_DBLCLICK_SCRIPT : ''}</body>
 </html>`;
     }
 
@@ -2382,12 +2424,17 @@ function formatTutuInlineText(text, typo, emph = false) {
 const TUTU_DIALOGUE_OVERRIDES_KEY = 'tutu_theater_dialogue_overrides';
 const TUTU_DIALOGUE_OVERRIDES_LIMIT = 200;
 
-/** 行样式：speech 台词气泡 / emph 强调（不是台词） / plain 普通段落 */
-const TUTU_LINE_MODES = ['speech', 'emph', 'plain'];
+/** 行样式：speech 台词气泡 / chat 聊天气泡 / emph 普通引用（强调） / plain 普通段落 */
+const TUTU_LINE_MODES = ['speech', 'chat', 'emph', 'plain'];
+
+/** 统一换行并去掉首尾空白：指纹和行号都按这个版本算，保证双击的行号和保存的行号一致 */
+function normalizeTutuPlainSource(text) {
+    return String(text || '').replace(/\r\n?/g, '\n').trim();
+}
 
 /** 内容指纹（FNV-1a），同一段文字在面板、楼层、收藏里都能对上 */
 function hashTutuText(text) {
-    const value = String(text || '').replace(/\r\n?/g, '\n').trim();
+    const value = normalizeTutuPlainSource(text);
     let hash = 0x811c9dc5;
 
     for (let i = 0; i < value.length; i++) {
@@ -2419,6 +2466,25 @@ function sanitizeTutuLineOverride(value) {
     if (name) result.name = name;
 
     return Object.keys(result).length ? result : null;
+}
+
+/**
+ * 渲染过的原文登记：双击某个块时按 data-tutu-src 找回原文。
+ * 只存在内存里，最多记 300 段。
+ */
+const tutuRenderedSources = new Map();
+
+function registerTutuRenderedSource(text) {
+    const key = hashTutuText(text);
+
+    tutuRenderedSources.delete(key);
+    tutuRenderedSources.set(key, normalizeTutuPlainSource(text));
+
+    while (tutuRenderedSources.size > 300) {
+        tutuRenderedSources.delete(tutuRenderedSources.keys().next().value);
+    }
+
+    return key;
 }
 
 /** 读取某段内容的修正：{ 行号: { mode, name } } */
@@ -2614,6 +2680,39 @@ function classifyTutuPlainLine(line, override = null) {
 
     if (TUTU_TIME_LINE.test(line)) return { type: 'time', text: line.trim() };
 
+    // 手动标成聊天气泡：任何行都当成一条聊天消息
+    if (mode === 'chat') {
+        const strict = parseTutuDialogueLine(line);
+        const loose = String(line).match(/^\s*([^：:\n]{1,12}?)\s*[：:]\s*(.+)$/);
+        let name = strict?.name || '';
+        let message = strict?.text || '';
+
+        if (!strict && loose && !TUTU_NARRATIVE_SPEAKER.test(loose[1].trim())) {
+            name = loose[1].trim();
+            message = loose[2].trim();
+        }
+
+        if (!message) {
+            // 「欲宓皱眉：“……”」/ 纯叙述：取引号里的话当消息，开头猜名字
+            const quotes = String(line).match(TUTU_SPEECH_QUOTE);
+            message = quotes
+                ? quotes.map(item => item.slice(1, -1).trim()).join(' ')
+                : String(line).trim();
+            name = guessTutuSpeakerName(line) || '';
+        }
+
+        // 引号包着的消息去掉引号
+        message = message.replace(/^[“「『"](.*)[”」』"]$/, '$1').trim() || String(line).trim();
+
+        return {
+            type: 'dialogue',
+            name: forcedName || name,
+            originalName: name,
+            text: message,
+            mode,
+        };
+    }
+
     const dialogue = parseTutuDialogueLine(line);
     if (dialogue) {
         return {
@@ -2650,12 +2749,16 @@ function pickTutuChatSelf(speakers) {
     return '';
 }
 
-function renderTutuChatRun(tokens, typo, markLines = false) {
+function renderTutuChatRun(tokens, typo, srcKey = '') {
     const speakers = [...new Set(
         tokens.filter(token => token.type === 'dialogue').map(token => token.name)
     )];
     const self = pickTutuChatSelf(speakers);
-    const attr = token => (markLines && Number.isInteger(token.line) ? ` data-tutu-line="${token.line}"` : '');
+    const attr = token => (
+        srcKey && Number.isInteger(token.line)
+            ? ` data-tutu-src="${srcKey}" data-tutu-line="${token.line}"`
+            : ''
+    );
 
     const rows = tokens.map(token => {
         if (token.type === 'time' || token.type === 'system') {
@@ -2684,12 +2787,13 @@ function renderTutuChatRun(tokens, typo, markLines = false) {
  */
 /**
  * options.overrides：手动修正 { 行号: { mode, name } }，不传时按内容指纹读取已保存的修正
- * options.markLines：给每个块加 data-tutu-line（编辑器预览用）
+ * 每个块都带 data-tutu-src（原文指纹）和 data-tutu-line（行号），双击修正时用
  */
 function formatTutuPlainHtml(text, typo = getTutuTypographyState(), options = {}) {
-    const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
-    const overrides = options.overrides || getTutuDialogueOverrides(text);
-    const markLines = Boolean(options.markLines);
+    const source = normalizeTutuPlainSource(text);
+    const lines = source.split('\n');
+    const overrides = options.overrides || getTutuDialogueOverrides(source);
+    const srcKey = registerTutuRenderedSource(source);
     const tokens = lines.map((line, lineIndex) => ({
         ...classifyTutuPlainLine(line, overrides[lineIndex] || null),
         line: lineIndex,
@@ -2698,7 +2802,7 @@ function formatTutuPlainHtml(text, typo = getTutuTypographyState(), options = {}
     let firstParagraphDone = false;
     let index = 0;
 
-    const lineAttr = token => (markLines && token ? ` data-tutu-line="${token.line}"` : '');
+    const lineAttr = token => (token ? ` data-tutu-src="${srcKey}" data-tutu-line="${token.line}"` : '');
 
     // 当前正在渲染的行，供各渲染函数加行号
     let currentToken = null;
@@ -2766,7 +2870,8 @@ function formatTutuPlainHtml(text, typo = getTutuTypographyState(), options = {}
     };
 
     const renderDialogue = token => {
-        if (!typo.dialogueBlock) {
+        // 手动标成台词的行即使没开「对话排版」也出气泡
+        if (!typo.dialogueBlock && token.mode !== 'speech') {
             return renderParagraph(`${token.name}：${token.text}`);
         }
 
@@ -2788,13 +2893,14 @@ function formatTutuPlainHtml(text, typo = getTutuTypographyState(), options = {}
         const line = token.text;
         const mode = token.mode || '';
 
-        if (!typo.dialogueBlock) return renderParagraph(line);
-
         // 手动取消气泡：原样段落（引号按普通高亮）
         if (mode === 'plain') return renderParagraph(line);
 
-        // 手动标成强调：所有引号都是强调样式，不出气泡
+        // 手动标成普通引用：所有引号都是强调样式，不出气泡
         if (mode === 'emph') return renderParagraph(line, true);
+
+        // 没开「对话排版」时只有手动标成台词的行出气泡
+        if (!typo.dialogueBlock && mode !== 'speech') return renderParagraph(line);
 
         let parts;
 
@@ -2854,13 +2960,14 @@ function formatTutuPlainHtml(text, typo = getTutuTypographyState(), options = {}
         ['time', 'system', 'blank'].includes(item.type) ||
         (item.type === 'dialogue' && item.mode !== 'speech')
     );
+    const isForcedChat = item => item.type === 'dialogue' && item.mode === 'chat';
 
     while (index < tokens.length) {
         const token = tokens[index];
         currentToken = token;
 
-        // 收集一段连续的聊天行（允许中间夹空行）
-        if (typo.chatBubble && token.type !== 'blank' && isChatToken(token)) {
+        // 收集一段连续的聊天行（允许中间夹空行）；手动标成聊天气泡的行即使没开「微信气泡」也收集
+        if ((typo.chatBubble || isForcedChat(token)) && token.type !== 'blank' && isChatToken(token)) {
             let end = index;
             let lastContent = index;
 
@@ -2872,14 +2979,14 @@ function formatTutuPlainHtml(text, typo = getTutuTypographyState(), options = {}
             const run = tokens.slice(index, lastContent + 1).filter(item => item.type !== 'blank');
             const dialogues = run.filter(item => item.type === 'dialogue');
             const nearby = lines.slice(Math.max(0, index - 2), index).join('\n');
-            const isChat = dialogues.length >= 2 && (
+            const isChat = dialogues.some(isForcedChat) || (typo.chatBubble && dialogues.length >= 2 && (
                 run.some(item => item.type === 'time') ||
                 dialogues.some(item => TUTU_CHAT_MEDIA.test(item.text)) ||
                 TUTU_CHAT_KEYWORDS.test(nearby)
-            );
+            ));
 
             if (isChat) {
-                html.push(renderTutuChatRun(run, typo, markLines));
+                html.push(renderTutuChatRun(run, typo, srcKey));
                 firstParagraphDone = true;
                 index = lastContent + 1;
                 continue;
@@ -3726,6 +3833,21 @@ function syncTutuRenderBindCategoryChecks() {
  * 渲染规则变化后，重新渲染面板当前结果和已嵌入楼层。
  */
 function refreshTutuCurrentRender() {
+    // 重新渲染会重建列表，记下滚动位置，渲染完还原
+    const scrollers = [
+        ...document.querySelectorAll('#tutu_theater_panel *, .tutu-fullscreen-body, #chat'),
+    ].filter(element => element.scrollTop > 0).map(element => [element, element.scrollTop]);
+
+    document.querySelectorAll('.tutu-fullscreen-plain').forEach(element => {
+        if (element._tutuSourceText) fillTutuPlainText(element, element._tutuSourceText);
+    });
+
+    document.querySelectorAll('.tutu-fullscreen-iframe').forEach(iframe => {
+        if (iframe._tutuSourceText && !isProbablyHtml(iframe._tutuSourceText)) {
+            iframe.srcdoc = buildTutuRenderedContent(iframe._tutuSourceText).html;
+        }
+    });
+
     if (String(tutuCurrentResultContent || '').trim()) {
         const status = $('#tutu_result_status').text();
         showTutuResult(tutuCurrentResultContent);
@@ -3744,6 +3866,10 @@ function refreshTutuCurrentRender() {
     } catch (error) {
         console.warn('[克制放映室] 刷新收藏失败：', error);
     }
+
+    scrollers.forEach(([element, top]) => {
+        if (element.isConnected) element.scrollTop = top;
+    });
 }
 // 给旧剧本补充分类字段
 let tutuScenarioChanged = false;
@@ -4147,33 +4273,6 @@ localStorage.setItem(
         </div>
 
         <pre id="tutu_result_source" class="tutu-result-source"></pre>
-
-        <!-- 对话气泡修正 -->
-        <div id="tutu_dialogue_editor" class="tutu-dialogue-editor" style="display:none;" role="region" aria-label="修正对话气泡">
-            <div class="tutu-dialogue-editor-head">
-                <div class="tutu-dialogue-editor-title">
-                    <i class="fa-solid fa-pen-to-square"></i>
-                    修正气泡
-                </div>
-                <div class="tutu-dialogue-editor-actions">
-                    <button type="button" id="tutu_dialogue_editor_reset" class="menu_button margin0" title="清除这段内容的所有修正，恢复自动识别">
-                        <i class="fa-solid fa-rotate-left"></i>
-                        <span>全部自动</span>
-                    </button>
-                    <button type="button" id="tutu_dialogue_editor_cancel" class="menu_button margin0" title="放弃修改">
-                        <i class="fa-solid fa-xmark"></i>
-                        <span>取消</span>
-                    </button>
-                    <button type="button" id="tutu_dialogue_editor_save" class="menu_button margin0 tutu-dialogue-editor-save" title="保存修正并重新渲染">
-                        <i class="fa-solid fa-floppy-disk"></i>
-                        <span>保存</span>
-                    </button>
-                </div>
-            </div>
-            <div id="tutu_dialogue_editor_hint" class="tutu-dialogue-editor-hint"></div>
-            <datalist id="tutu_dialogue_editor_names"></datalist>
-            <div id="tutu_dialogue_editor_list" class="tutu-dialogue-editor-list"></div>
-        </div>
 
     </div>
 
@@ -7664,6 +7763,7 @@ function openTutuTheaterFullscreen(
 
         iframe.className = 'tutu-fullscreen-iframe';
         iframe.title = '克制放映室全屏内容';
+        iframe._tutuSourceText = text;
 
         iframe.setAttribute(
             'sandbox',
@@ -7678,6 +7778,9 @@ function openTutuTheaterFullscreen(
 
         plain.className = 'tutu-fullscreen-plain';
         fillTutuPlainText(plain, text);
+
+        // 修正气泡后按原文重新渲染
+        plain._tutuSourceText = text;
 
         body.appendChild(plain);
     }
@@ -7730,9 +7833,6 @@ function closeTutuTheaterFullscreen() {
 
 
 function showTutuResultMode(mode) {
-    // 切换预览 / 源码或出新结果时关掉气泡编辑器（未保存的修改丢弃）
-    closeTutuDialogueEditor();
-
     if (mode === 'source') {
         $('#tutu_result_preview').hide();
         $('#tutu_result_source').show();
@@ -7749,104 +7849,473 @@ function showTutuResultMode(mode) {
 }
 
 // ==========================================
-// 对话气泡修正编辑器
+// 对话气泡修正：双击菜单 + 修正面板，改动自动保存
 // ==========================================
 
-/** 编辑中的内容和草稿：{ text, draft: { 行号: { mode, name } } } */
-let tutuDialogueEditorState = null;
-
 const TUTU_LINE_MODE_OPTIONS = [
-    { value: '', label: '自动', title: '按自动识别显示' },
-    { value: 'speech', label: '台词', title: '显示成台词气泡（名字 + 粗竖线）' },
-    { value: 'emph', label: '强调', title: '引号是强调，不是说话：用强调样式，不出气泡' },
-    { value: 'plain', label: '无气泡', title: '取消气泡，按普通段落显示' },
+    { value: '', label: '自动', icon: 'fa-wand-magic-sparkles', title: '按自动识别显示' },
+    { value: 'speech', label: '对话', icon: 'fa-comment', title: '台词气泡：名字 + 粗竖线，台词放进气泡' },
+    { value: 'chat', label: '聊天气泡', icon: 'fa-comments', title: '微信式聊天气泡：头像 + 名字 + 消息' },
+    { value: 'emph', label: '普通引用', icon: 'fa-quote-left', title: '引号只是引用 / 强调，不是说话：不出气泡' },
+    { value: 'plain', label: '无气泡', icon: 'fa-paragraph', title: '按普通段落显示' },
 ];
 
-/** 编辑器要列出的行：含引号的行、「名字：」行 */
-function collectTutuEditableLines(text) {
-    const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
-    const quoteTest = /[“”「」『』"‘’]/;
-
-    return lines
-        .map((line, index) => ({ line, index }))
-        .filter(({ line }) => line.trim() && (quoteTest.test(line) || parseTutuDialogueLine(line)));
+function getTutuLineModeLabel(mode) {
+    return TUTU_LINE_MODE_OPTIONS.find(item => item.value === mode)?.label || '自动';
 }
 
-/** 根据当前草稿渲染预览，按行号拿到每行对应的块，读出自动识别的名字 */
-function renderTutuDialogueEditorPreview(text, draft) {
-    const typo = getTutuTypographyState();
+/** 读出块当前显示成什么：kind 对应模式值，name 是显示的说话人 */
+function describeTutuBlock(element) {
+    if (!element) return { kind: 'plain', label: '段落', name: '' };
+
+    if (element.classList.contains('tutu-dialogue')) {
+        return {
+            kind: 'speech',
+            label: '对话',
+            name: element.querySelector('.tutu-dialogue-name')?.textContent || '',
+        };
+    }
+
+    if (element.classList.contains('tutu-chat-row')) {
+        return {
+            kind: 'chat',
+            label: '聊天气泡',
+            name: element.querySelector('.tutu-chat-name')?.textContent || '',
+        };
+    }
+
+    if (element.classList.contains('tutu-chat-tip')) return { kind: 'plain', label: '聊天提示', name: '' };
+    if (element.querySelector('.tutu-emph')) return { kind: 'emph', label: '普通引用', name: '' };
+
+    return { kind: 'plain', label: '段落', name: '' };
+}
+
+/** 修改某一行的修正并立即保存，所有显示位置重新渲染 */
+function setTutuLineOverride(text, lineIndex, patch) {
+    const source = normalizeTutuPlainSource(text);
+    const lines = { ...getTutuDialogueOverrides(source) };
+    const next = sanitizeTutuLineOverride({ ...(lines[lineIndex] || {}), ...patch });
+
+    if (next) lines[lineIndex] = next;
+    else delete lines[lineIndex];
+
+    saveTutuDialogueOverrides(source, lines);
+    refreshTutuCurrentRender();
+    renderTutuDialogueEditor();
+}
+
+/** 名字候选：酒馆角色 / 用户 + 这段里出现过的名字 */
+function collectTutuNameSuggestions(text) {
+    const names = new Set(collectTutuKnownSpeakerNames([]));
     const container = document.createElement('div');
 
-    container.innerHTML = formatTutuPlainHtml(text, typo, { overrides: draft, markLines: true });
+    container.innerHTML = formatTutuPlainHtml(text);
+    container.querySelectorAll('.tutu-dialogue-name, .tutu-chat-name').forEach(element => {
+        const name = element.textContent.trim();
+        if (name) names.add(name);
+    });
+
+    Object.values(getTutuDialogueOverrides(text)).forEach(item => item?.name && names.add(item.name));
+
+    return [...names];
+}
+
+function fillTutuNameDatalist(text) {
+    let list = document.getElementById('tutu_line_name_suggestions');
+
+    if (!list) {
+        list = document.createElement('datalist');
+        list.id = 'tutu_line_name_suggestions';
+        document.body.appendChild(list);
+    }
+
+    list.innerHTML = collectTutuNameSuggestions(text)
+        .map(name => `<option value="${escapeHtml(name)}"></option>`)
+        .join('');
+}
+
+// ---------- 双击菜单 ----------
+
+function closeTutuLinePopover() {
+    const popover = document.getElementById('tutu_line_popover');
+
+    if (!popover) return;
+
+    // 关之前把没失焦的名字提交掉
+    const input = popover.querySelector('.tutu-line-popover-name');
+    if (input && input.dataset.dirty === '1') commitTutuPopoverName(popover, input);
+
+    popover.remove();
+    document.removeEventListener('pointerdown', handleTutuPopoverOutside, true);
+    document.removeEventListener('keydown', handleTutuPopoverKey, true);
+}
+
+function handleTutuPopoverOutside(event) {
+    const popover = document.getElementById('tutu_line_popover');
+    if (popover && !popover.contains(event.target)) closeTutuLinePopover();
+}
+
+function handleTutuPopoverKey(event) {
+    if (event.key === 'Escape') {
+        event.stopPropagation();
+        closeTutuLinePopover();
+    }
+}
+
+function commitTutuPopoverName(popover, input) {
+    input.dataset.dirty = '0';
+
+    const value = String(input.value || '').trim();
+    const auto = popover._tutuAutoName || '';
+
+    setTutuLineOverride(popover._tutuText, popover._tutuLine, {
+        // 和自动识别的一样就不存，保持「自动」
+        name: value && value !== auto ? value : '',
+    });
+}
+
+/**
+ * 弹出某一行的修正菜单
+ * info：{ text, line, x, y, kind, name, focusName }
+ */
+function openTutuLinePopover(info) {
+    closeTutuLinePopover();
+
+    const text = normalizeTutuPlainSource(info.text);
+    const lines = text.split('\n');
+    const lineText = lines[info.line];
+
+    if (lineText === undefined) return;
+
+    const override = getTutuDialogueOverrides(text)[info.line] || {};
+    const mode = override.mode || '';
+    const showName = !['emph', 'plain'].includes(mode) && !['emph', 'plain'].includes(info.kind);
+    const autoName = override.name ? '' : String(info.name || '');
+
+    fillTutuNameDatalist(text);
+
+    const popover = document.createElement('div');
+    popover.id = 'tutu_line_popover';
+    popover.className = 'tutu-line-popover';
+    popover.setAttribute('role', 'dialog');
+    popover.setAttribute('aria-label', `修正第 ${info.line + 1} 行`);
+    popover._tutuText = text;
+    popover._tutuLine = info.line;
+    popover._tutuAutoName = autoName || override.name || '';
+
+    const modeButtons = TUTU_LINE_MODE_OPTIONS.map(option => `
+        <button type="button"
+            class="tutu-line-popover-mode${option.value === mode ? ' active' : ''}"
+            data-mode="${option.value}"
+            aria-pressed="${option.value === mode ? 'true' : 'false'}"
+            title="${option.title}">
+            <i class="fa-solid ${option.icon}" aria-hidden="true"></i>
+            <span>${option.label}</span>
+        </button>`).join('');
+
+    popover.innerHTML = `
+        <div class="tutu-line-popover-head">
+            <span>第 ${info.line + 1} 行 · 现在：${escapeHtml(mode ? getTutuLineModeLabel(mode) : `自动（${describeTutuKindLabel(info.kind)}）`)}</span>
+            <button type="button" class="tutu-line-popover-close" aria-label="关闭" title="关闭（Esc）">
+                <i class="fa-solid fa-xmark"></i>
+            </button>
+        </div>
+        <div class="tutu-line-popover-source">${escapeHtml(lineText.trim())}</div>
+        <div class="tutu-line-popover-modes" role="group" aria-label="显示成">${modeButtons}</div>
+        ${showName ? `
+        <label class="tutu-line-popover-name-row">
+            <span>说话人</span>
+            <input type="text"
+                class="text_pole tutu-line-popover-name"
+                list="tutu_line_name_suggestions"
+                maxlength="12"
+                value="${escapeHtml(override.name || autoName)}"
+                placeholder="留空用自动识别">
+        </label>` : ''}
+        <div class="tutu-line-popover-foot">
+            <span>改动自动保存</span>
+            <button type="button" class="tutu-line-popover-more">
+                <i class="fa-solid fa-list-check"></i>
+                逐行修正
+            </button>
+        </div>`;
+
+    document.body.appendChild(popover);
+
+    // 定位到双击处，超出屏幕时往回收
+    const rect = popover.getBoundingClientRect();
+    const margin = 8;
+    const left = Math.min(Math.max(margin, info.x - 20), window.innerWidth - rect.width - margin);
+    let top = info.y + 14;
+
+    if (top + rect.height > window.innerHeight - margin) top = info.y - rect.height - 14;
+
+    popover.style.left = `${Math.max(margin, left)}px`;
+    popover.style.top = `${Math.max(margin, top)}px`;
+
+    popover.querySelectorAll('.tutu-line-popover-mode').forEach(button => {
+        button.addEventListener('click', () => {
+            const input = popover.querySelector('.tutu-line-popover-name');
+            const patch = { mode: button.dataset.mode || '' };
+
+            if (input && input.dataset.dirty === '1') {
+                const value = input.value.trim();
+                patch.name = value && value !== popover._tutuAutoName ? value : '';
+                input.dataset.dirty = '0';
+            }
+
+            setTutuLineOverride(text, info.line, patch);
+            closeTutuLinePopover();
+            toastr.success(`已改成「${getTutuLineModeLabel(patch.mode)}」`, '', { timeOut: 1500 });
+        });
+    });
+
+    const input = popover.querySelector('.tutu-line-popover-name');
+
+    if (input) {
+        input.addEventListener('input', () => { input.dataset.dirty = '1'; });
+        input.addEventListener('change', () => commitTutuPopoverName(popover, input));
+        input.addEventListener('keydown', event => {
+            if (event.key === 'Enter') {
+                event.preventDefault();
+                commitTutuPopoverName(popover, input);
+                closeTutuLinePopover();
+                toastr.success('名字已保存', '', { timeOut: 1500 });
+            }
+        });
+
+        if (info.focusName) {
+            input.focus();
+            input.select();
+        }
+    }
+
+    popover.querySelector('.tutu-line-popover-close').addEventListener('click', closeTutuLinePopover);
+    popover.querySelector('.tutu-line-popover-more').addEventListener('click', () => {
+        closeTutuLinePopover();
+        openTutuDialogueEditor(text, info.line);
+    });
+
+    if (!info.focusName) popover.querySelector('.tutu-line-popover-mode.active, .tutu-line-popover-mode')?.focus();
+
+    // 等这次双击结束再监听外部点击
+    setTimeout(() => {
+        document.addEventListener('pointerdown', handleTutuPopoverOutside, true);
+        document.addEventListener('keydown', handleTutuPopoverKey, true);
+    }, 0);
+}
+
+function describeTutuKindLabel(kind) {
+    return { speech: '对话', chat: '聊天气泡', emph: '普通引用' }[kind] || '段落';
+}
+
+// ---------- 双击名字直接改 ----------
+
+function startTutuInlineNameEdit(nameElement, text, lineIndex) {
+    if (nameElement.isContentEditable) return;
+
+    const original = nameElement.textContent;
+    const override = getTutuDialogueOverrides(text)[lineIndex] || {};
+    const autoName = override.name ? '' : original;
+    let finished = false;
+
+    nameElement.setAttribute('contenteditable', 'plaintext-only');
+    if (nameElement.contentEditable !== 'plaintext-only') nameElement.setAttribute('contenteditable', 'true');
+    nameElement.classList.add('tutu-name-editing');
+    nameElement.setAttribute('aria-label', '输入说话人名字，回车保存，Esc 取消');
+    nameElement.focus();
+
+    const range = document.createRange();
+    range.selectNodeContents(nameElement);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+
+    const finish = save => {
+        if (finished) return;
+        finished = true;
+
+        nameElement.removeEventListener('keydown', onKey);
+        nameElement.removeEventListener('blur', onBlur);
+        nameElement.removeAttribute('contenteditable');
+        nameElement.classList.remove('tutu-name-editing');
+
+        const value = nameElement.textContent.replace(/[\r\n]/g, '').trim();
+
+        if (!save || value === original) {
+            nameElement.textContent = original;
+            return;
+        }
+
+        // 清空 = 恢复自动识别；和自动识别一样也不存
+        setTutuLineOverride(text, lineIndex, { name: value && value !== autoName ? value : '' });
+        toastr.success(value ? `说话人改成「${value}」` : '已恢复自动识别的名字', '', { timeOut: 1500 });
+    };
+
+    const onKey = event => {
+        event.stopPropagation();
+
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            finish(true);
+        } else if (event.key === 'Escape') {
+            event.preventDefault();
+            finish(false);
+        } else if (
+            event.key.length === 1 &&
+            !event.ctrlKey && !event.metaKey &&
+            Array.from(nameElement.textContent).length >= 12 &&
+            selection.isCollapsed
+        ) {
+            event.preventDefault();
+        }
+    };
+
+    const onBlur = () => finish(true);
+
+    nameElement.addEventListener('keydown', onKey);
+    nameElement.addEventListener('blur', onBlur);
+}
+
+// 页面上的结构化排版（面板预览、楼层、收藏、全屏）：双击块弹菜单，双击名字直接改
+$(document).on('dblclick', '.tutu-typo-formatted [data-tutu-line][data-tutu-src]', function (event) {
+    if ($(event.target).closest('.tutu-dialogue-editor, .tutu-line-popover, [contenteditable]').length) return;
+
+    const block = event.currentTarget;
+
+    // 嵌套时只处理最内层
+    if (event.target.closest('[data-tutu-line][data-tutu-src]') !== block) return;
+
+    const text = tutuRenderedSources.get(block.getAttribute('data-tutu-src'));
+    const lineIndex = Number(block.getAttribute('data-tutu-line'));
+
+    if (!text || !Number.isInteger(lineIndex)) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    window.getSelection()?.removeAllRanges();
+
+    const nameElement = event.target.closest('.tutu-dialogue-name, .tutu-chat-name');
+
+    if (nameElement && block.contains(nameElement)) {
+        closeTutuLinePopover();
+        startTutuInlineNameEdit(nameElement, text, lineIndex);
+        return;
+    }
+
+    const info = describeTutuBlock(block);
+
+    openTutuLinePopover({
+        text,
+        line: lineIndex,
+        x: event.clientX,
+        y: event.clientY,
+        kind: info.kind,
+        name: info.name,
+        focusName: Boolean(event.target.closest('.tutu-chat-avatar')),
+    });
+});
+
+// iframe 里的结构化排版（启用渲染 CSS 时）：里面报上来的双击
+function initTutuLineDblclickListener() {
+    if (window.__tutuLineDblclickListener) return;
+    window.__tutuLineDblclickListener = true;
+
+    window.addEventListener('message', event => {
+        const data = event.data;
+
+        if (!data || data.type !== 'tutu-theater-line-dblclick') return;
+
+        const iframe = Array.from(document.querySelectorAll('iframe')).find(
+            frame => frame.contentWindow === event.source
+        );
+
+        if (!iframe) return;
+
+        const text = tutuRenderedSources.get(String(data.src || ''));
+        const lineIndex = Number(data.line);
+
+        if (!text || !Number.isInteger(lineIndex) || lineIndex < 0) return;
+
+        const rect = iframe.getBoundingClientRect();
+
+        openTutuLinePopover({
+            text,
+            line: lineIndex,
+            x: rect.left + Number(data.x || 0),
+            y: rect.top + Number(data.y || 0),
+            kind: ['speech', 'chat', 'emph', 'plain'].includes(data.kind) ? data.kind : 'plain',
+            name: String(data.name || '').slice(0, 12),
+            // iframe 里没法直接改字，双击名字时把焦点放进名字输入框
+            focusName: Boolean(data.onName),
+        });
+    });
+}
+
+initTutuLineDblclickListener();
+
+// ---------- 逐行修正面板 ----------
+
+/** 面板当前在修正的原文 */
+let tutuDialogueEditorText = '';
+
+/** 面板里列出的行：含引号、「名字：」或已经修正过的行 */
+function collectTutuEditableLines(text) {
+    const source = normalizeTutuPlainSource(text);
+    const overrides = getTutuDialogueOverrides(source);
+    const quoteTest = /[“”「」『』"‘’]/;
+
+    return source.split('\n')
+        .map((line, index) => ({ line, index }))
+        .filter(({ line, index }) => line.trim() && (
+            overrides[index] ||
+            quoteTest.test(line) ||
+            parseTutuDialogueLine(line)
+        ));
+}
+
+function renderTutuDialogueEditor() {
+    const modal = document.getElementById('tutu_dialogue_editor');
+    const text = tutuDialogueEditorText;
+
+    if (!modal || !text) return;
+
+    const list = modal.querySelector('.tutu-dialogue-editor-list');
+    const hint = modal.querySelector('.tutu-dialogue-editor-hint');
+    const typo = getTutuTypographyState();
+    const overrides = getTutuDialogueOverrides(text);
+    const items = collectTutuEditableLines(text);
+
+    const container = document.createElement('div');
+    container.innerHTML = formatTutuPlainHtml(text, typo);
 
     const blocks = new Map();
-
     container.querySelectorAll('[data-tutu-line]').forEach(element => {
         blocks.set(Number(element.getAttribute('data-tutu-line')), element);
     });
 
-    return blocks;
-}
-
-function describeTutuBlock(element) {
-    if (!element) return { kind: '段落', name: '' };
-
-    if (element.classList.contains('tutu-dialogue')) {
-        const name = element.querySelector('.tutu-dialogue-name')?.textContent || '';
-        return { kind: '台词气泡', name };
-    }
-
-    if (element.classList.contains('tutu-chat-row')) {
-        const name = element.querySelector('.tutu-chat-name')?.textContent || '';
-        return { kind: '聊天气泡', name };
-    }
-
-    if (element.querySelector('.tutu-emph')) return { kind: '强调', name: '' };
-
-    return { kind: '段落', name: '' };
-}
-
-function renderTutuDialogueEditor() {
-    const state = tutuDialogueEditorState;
-    const $list = $('#tutu_dialogue_editor_list');
-
-    if (!state) return;
-
-    const typo = getTutuTypographyState();
-    const items = collectTutuEditableLines(state.text);
-    const blocks = renderTutuDialogueEditorPreview(state.text, state.draft);
-
-    // 名字候选：已知角色 + 自动识别出的名字 + 已改过的名字
-    const names = new Set(collectTutuKnownSpeakerNames([]));
-    blocks.forEach(element => {
-        const name = describeTutuBlock(element).name;
-        if (name) names.add(name);
-    });
-    Object.values(state.draft).forEach(item => item?.name && names.add(item.name));
-
-    $('#tutu_dialogue_editor_names').html(
-        [...names].map(name => `<option value="${escapeHtml(name)}"></option>`).join('')
-    );
+    fillTutuNameDatalist(text);
 
     const hints = [];
-    if (!typo.enabled) hints.push('排版美化未启用，修正保存后要开启排版美化才会显示。');
-    else if (!typo.dialogueBlock && !typo.chatBubble) hints.push('「对话排版」和「微信气泡」都没开，台词气泡不会显示，可在排版设置里打开。');
-    else if (!typo.dialogueBlock) hints.push('「对话排版」没开，只有微信聊天会出气泡。');
-    hints.push('名字留空 = 用自动识别的名字；「强调」用于引号只是强调词、不是说话的情况。');
-    $('#tutu_dialogue_editor_hint').text(hints.join(' '));
+    if (!typo.enabled) hints.push('排版美化未启用，开启后修正才会显示。');
+    hints.push('改动自动保存；在正文里双击某一段也能改，双击名字可以直接改名。');
+    hint.textContent = hints.join(' ');
+
+    // 保持滚动位置和焦点所在行
+    const scrollTop = list.scrollTop;
+    const focusedLine = document.activeElement?.closest?.('.tutu-dialogue-editor-item')?.dataset.line;
 
     if (!items.length) {
-        $list.html('<div class="tutu-dialogue-editor-empty">这段内容里没有台词或引号，不需要修正。</div>');
+        list.innerHTML = '<div class="tutu-dialogue-editor-empty">这段内容里没有台词或引号，不需要修正。</div>';
         return;
     }
 
-    const html = items.map(({ line, index }) => {
-        const draft = state.draft[index] || {};
-        const mode = draft.mode || '';
+    list.innerHTML = items.map(({ line, index }) => {
+        const override = overrides[index] || {};
+        const mode = override.mode || '';
         const element = blocks.get(index);
         const info = describeTutuBlock(element);
-        const showName = mode !== 'emph' && mode !== 'plain';
-        const autoName = draft.name ? '' : info.name;
+        const showName = !['emph', 'plain'].includes(mode) && !['emph', 'plain'].includes(info.kind);
 
         const modeButtons = TUTU_LINE_MODE_OPTIONS.map(option => `
             <button type="button"
@@ -7856,43 +8325,44 @@ function renderTutuDialogueEditor() {
                 title="${option.title}">${option.label}</button>`).join('');
 
         // 聊天行要套一层 .tutu-chat 才有聊天背景和左右排布
-        const blockHtml = element?.classList.contains('tutu-chat-row')
+        const blockHtml = element?.classList.contains('tutu-chat-row') || element?.classList.contains('tutu-chat-tip')
             ? `<div class="tutu-chat">${element.outerHTML}</div>`
             : element?.outerHTML || '';
 
-        const preview = blockHtml
-            ? `<div class="tutu-dialogue-editor-preview tutu-typo-plain tutu-typo-formatted">${blockHtml}</div>`
-            : '';
-
         return `
-            <div class="tutu-dialogue-editor-item${draft.mode || draft.name ? ' changed' : ''}" data-line="${index}">
+            <div class="tutu-dialogue-editor-item${mode || override.name ? ' changed' : ''}" data-line="${index}">
                 <div class="tutu-dialogue-editor-meta">
-                    <span class="tutu-dialogue-editor-line">第 ${index + 1} 行</span>
-                    <span class="tutu-dialogue-editor-kind">${escapeHtml(info.kind)}</span>
+                    <span>第 ${index + 1} 行</span>
+                    <span class="tutu-dialogue-editor-kind">${escapeHtml(mode ? getTutuLineModeLabel(mode) : `自动 · ${info.label}`)}</span>
                 </div>
                 <div class="tutu-dialogue-editor-source">${escapeHtml(line.trim())}</div>
                 <div class="tutu-dialogue-editor-controls">
-                    <div class="tutu-line-mode-group" role="group" aria-label="第 ${index + 1} 行样式">${modeButtons}</div>
+                    <div class="tutu-line-mode-group" role="group" aria-label="第 ${index + 1} 行显示成">${modeButtons}</div>
                     ${showName ? `
                     <input type="text"
                         class="text_pole tutu-line-name-input"
-                        list="tutu_dialogue_editor_names"
+                        list="tutu_line_name_suggestions"
                         maxlength="12"
-                        value="${escapeHtml(draft.name || '')}"
-                        placeholder="${autoName ? `自动：${escapeHtml(autoName)}` : '说话人名字'}"
+                        value="${escapeHtml(override.name || '')}"
+                        data-auto="${escapeHtml(override.name ? '' : info.name)}"
+                        placeholder="${info.name && !override.name ? `自动：${escapeHtml(info.name)}` : '说话人名字'}"
                         aria-label="第 ${index + 1} 行说话人">` : ''}
                 </div>
-                ${preview}
+                ${blockHtml ? `<div class="tutu-dialogue-editor-preview tutu-typo-plain tutu-typo-formatted">${blockHtml}</div>` : ''}
             </div>`;
     }).join('');
 
-    $list.html(html);
+    list.scrollTop = scrollTop;
+
+    if (focusedLine !== undefined) {
+        list.querySelector(`.tutu-dialogue-editor-item[data-line="${focusedLine}"] .tutu-line-mode-btn.active`)?.focus();
+    }
 }
 
-function openTutuDialogueEditor() {
-    const text = String(tutuCurrentResultContent || '');
+function openTutuDialogueEditor(content = tutuCurrentResultContent, focusLine = null) {
+    const text = normalizeTutuPlainSource(content);
 
-    if (!text.trim()) {
+    if (!text) {
         toastr.warning('还没有可以修正的内容');
         return;
     }
@@ -7902,100 +8372,178 @@ function openTutuDialogueEditor() {
         return;
     }
 
-    tutuDialogueEditorState = {
-        text,
-        draft: JSON.parse(JSON.stringify(getTutuDialogueOverrides(text))),
-    };
+    closeTutuLinePopover();
+    closeTutuDialogueEditor();
+
+    tutuDialogueEditorText = text;
+
+    const modal = document.createElement('div');
+    modal.id = 'tutu_dialogue_editor';
+    modal.className = 'tutu-dialogue-editor-overlay';
+    modal.innerHTML = `
+        <div class="tutu-dialogue-editor" role="dialog" aria-modal="true" aria-label="修正气泡">
+            <div class="tutu-dialogue-editor-head">
+                <div class="tutu-dialogue-editor-title">
+                    <i class="fa-solid fa-pen-to-square"></i>
+                    修正气泡
+                </div>
+                <div class="tutu-dialogue-editor-actions">
+                    <button type="button" class="menu_button margin0 tutu-dialogue-editor-reset" title="清除这段内容的所有修正，恢复自动识别">
+                        <i class="fa-solid fa-rotate-left"></i>
+                        <span>全部自动</span>
+                    </button>
+                    <button type="button" class="menu_button margin0 tutu-dialogue-editor-done" title="关闭（改动已自动保存）">
+                        <i class="fa-solid fa-check"></i>
+                        <span>完成</span>
+                    </button>
+                </div>
+            </div>
+            <div class="tutu-dialogue-editor-hint"></div>
+            <div class="tutu-dialogue-editor-list"></div>
+        </div>`;
+
+    document.body.appendChild(modal);
+    $('#tutu_edit_dialogue_btn').addClass('active');
 
     renderTutuDialogueEditor();
 
-    $('#tutu_result_preview').hide();
-    $('#tutu_result_source').hide();
-    $('#tutu_dialogue_editor').show();
-    $('#tutu_edit_dialogue_btn').addClass('active');
+    if (focusLine !== null) {
+        const item = modal.querySelector(`.tutu-dialogue-editor-item[data-line="${focusLine}"]`);
+
+        if (item) {
+            item.scrollIntoView({ block: 'center' });
+            item.classList.add('flash');
+            setTimeout(() => item.classList.remove('flash'), 1200);
+        }
+    }
+
+    modal.querySelector('.tutu-dialogue-editor-done').focus();
+
+    modal._tutuEscHandler = event => {
+        if (event.key === 'Escape' && !document.getElementById('tutu_line_popover')) {
+            event.stopPropagation();
+            closeTutuDialogueEditor();
+        }
+    };
+
+    document.addEventListener('keydown', modal._tutuEscHandler, true);
 }
 
 function closeTutuDialogueEditor() {
-    if (!tutuDialogueEditorState && !$('#tutu_dialogue_editor').is(':visible')) return;
+    const modal = document.getElementById('tutu_dialogue_editor');
 
-    tutuDialogueEditorState = null;
-    $('#tutu_dialogue_editor').hide();
-    $('#tutu_dialogue_editor_list').empty();
+    tutuDialogueEditorText = '';
     $('#tutu_edit_dialogue_btn').removeClass('active');
+
+    if (!modal) return;
+
+    // 正在输入的名字先提交
+    const input = modal.querySelector('.tutu-line-name-input[data-dirty="1"]');
+    if (input) commitTutuEditorName(input, false);
+
+    if (modal._tutuEscHandler) document.removeEventListener('keydown', modal._tutuEscHandler, true);
+    modal.remove();
 }
 
-function updateTutuDialogueDraft(lineIndex, patch) {
-    const state = tutuDialogueEditorState;
-    if (!state) return;
+function commitTutuEditorName(input, rerender = true) {
+    const text = tutuDialogueEditorText;
+    const lineIndex = Number(input.closest('.tutu-dialogue-editor-item')?.dataset.line);
 
-    const next = sanitizeTutuLineOverride({ ...(state.draft[lineIndex] || {}), ...patch });
+    if (!text || !Number.isInteger(lineIndex)) return;
 
-    if (next) state.draft[lineIndex] = next;
-    else delete state.draft[lineIndex];
+    input.dataset.dirty = '0';
+
+    const value = String(input.value || '').trim();
+    const auto = input.dataset.auto || '';
+    const source = normalizeTutuPlainSource(text);
+    const lines = { ...getTutuDialogueOverrides(source) };
+    const next = sanitizeTutuLineOverride({ ...(lines[lineIndex] || {}), name: value && value !== auto ? value : '' });
+
+    if (next) lines[lineIndex] = next;
+    else delete lines[lineIndex];
+
+    saveTutuDialogueOverrides(source, lines);
+    refreshTutuCurrentRender();
+
+    if (rerender) renderTutuDialogueEditor();
 }
 
 $(document).on('click keydown', '#tutu_edit_dialogue_btn', function (event) {
     if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') return;
     event.preventDefault();
 
-    if ($('#tutu_dialogue_editor').is(':visible')) {
-        closeTutuDialogueEditor();
-        showTutuResultMode('preview');
-    } else {
-        openTutuDialogueEditor();
+    if (document.getElementById('tutu_dialogue_editor')) closeTutuDialogueEditor();
+    else openTutuDialogueEditor();
+});
+
+// 收藏卡片上的「修正气泡」
+$(document).on('click', '.tutu-favorite-bubble-btn', function (event) {
+    event.stopPropagation();
+
+    const id = String($(this).closest('.tutu-favorite-card').data('id'));
+    const favorite = loadTutuFavorites().find(item => String(item.id) === id);
+
+    if (!favorite) {
+        toastr.error('找不到这条收藏');
+        return;
     }
+
+    openTutuDialogueEditor(favorite.content);
+});
+
+$(document).on('click', '#tutu_dialogue_editor', function (event) {
+    // 点遮罩关闭
+    if (event.target === this) closeTutuDialogueEditor();
 });
 
 $(document).on('click', '#tutu_dialogue_editor .tutu-line-mode-btn', function () {
     const lineIndex = Number($(this).closest('.tutu-dialogue-editor-item').attr('data-line'));
-    const mode = String($(this).attr('data-mode') || '');
+    const input = $(this).closest('.tutu-dialogue-editor-item').find('.tutu-line-name-input')[0];
+    const patch = { mode: String($(this).attr('data-mode') || '') };
 
-    updateTutuDialogueDraft(lineIndex, { mode });
-    renderTutuDialogueEditor();
+    // 名字改了还没失焦就点了样式：一起保存
+    if (input && input.dataset.dirty === '1') {
+        const value = input.value.trim();
+        patch.name = value && value !== (input.dataset.auto || '') ? value : '';
+    }
+
+    setTutuLineOverride(tutuDialogueEditorText, lineIndex, patch);
 });
 
-// 改名字只更新草稿；失焦 / 回车时刷新预览，避免打字时输入框被重建
+// 改名字：打字时只标记，失焦 / 回车时保存，避免打字时输入框被重建
 $(document).on('input', '#tutu_dialogue_editor .tutu-line-name-input', function () {
-    const lineIndex = Number($(this).closest('.tutu-dialogue-editor-item').attr('data-line'));
-
-    updateTutuDialogueDraft(lineIndex, { name: String($(this).val() || '') });
+    this.dataset.dirty = '1';
     $(this).closest('.tutu-dialogue-editor-item').addClass('changed');
 });
 
 $(document).on('change', '#tutu_dialogue_editor .tutu-line-name-input', function () {
-    renderTutuDialogueEditor();
+    commitTutuEditorName(this);
 });
 
 $(document).on('keydown', '#tutu_dialogue_editor .tutu-line-name-input', function (event) {
     if (event.key === 'Enter') {
         event.preventDefault();
-        $(this).trigger('change');
+        commitTutuEditorName(this);
     }
 });
 
-$(document).on('click', '#tutu_dialogue_editor_reset', function () {
-    if (!tutuDialogueEditorState) return;
+$(document).on('click', '#tutu_dialogue_editor .tutu-dialogue-editor-reset', function () {
+    const text = tutuDialogueEditorText;
+    if (!text) return;
 
-    tutuDialogueEditorState.draft = {};
-    renderTutuDialogueEditor();
-    toastr.info('已恢复自动识别，点「保存」生效');
-});
+    if (!Object.keys(getTutuDialogueOverrides(text)).length) {
+        toastr.info('这段内容还没有修正');
+        return;
+    }
 
-$(document).on('click', '#tutu_dialogue_editor_cancel', function () {
-    closeTutuDialogueEditor();
-    showTutuResultMode('preview');
-});
-
-$(document).on('click', '#tutu_dialogue_editor_save', function () {
-    const state = tutuDialogueEditorState;
-    if (!state) return;
-
-    saveTutuDialogueOverrides(state.text, state.draft);
-    closeTutuDialogueEditor();
-
-    // 面板、已嵌入楼层、收藏一起重新渲染
+    saveTutuDialogueOverrides(text, {});
     refreshTutuCurrentRender();
-    toastr.success('气泡修正已保存');
+    renderTutuDialogueEditor();
+    toastr.success('已恢复自动识别');
+});
+
+$(document).on('click', '#tutu_dialogue_editor .tutu-dialogue-editor-done', function () {
+    closeTutuDialogueEditor();
 });
 
 let tutuCurrentCharacterContext = {
