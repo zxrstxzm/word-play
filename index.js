@@ -1371,6 +1371,8 @@ function saveTutuExpandedCategories() {
 }
 
 let tutuIsGenerating = false;
+// 当前生成的令牌 { cancelled, controller, onCancel }
+let tutuCurrentGeneration = null;
 let tutuLastAutoMessageKey = '';
 let tutuSettings = loadLocalJson(SETTINGS_KEY, {
     provider: 'main',
@@ -1421,6 +1423,8 @@ renderCssEnabled: true,
 // 历史聊天记录：只读标签 / 排除标签（逗号分隔）
 historyIncludeTags: '',
 historyExcludeTags: '',
+// 历史聊天记录：自动排除 HTML 注释
+historyExcludeComments: true,
 
     ...tutuSettings,
 };
@@ -1470,6 +1474,10 @@ function normalizeTutuRenderLibrary(data) {
             substituteRegex: Number(item.substituteRegex) || 0,
             source: String(item.source || ''),
             enabled: item.enabled !== false,
+            // 所属分组（空 = 未分组）
+            groupId: String(item.groupId || ''),
+            // 单独绑定的小剧场条目 id（空 = 跟随分组 / 全局）
+            bindScenarioIds: normalizeTutuIdList(item.bindScenarioIds),
         }));
 
     const css = (Array.isArray(source.css) ? source.css : [])
@@ -1480,9 +1488,124 @@ function normalizeTutuRenderLibrary(data) {
             css: String(item.css || ''),
             source: String(item.source || ''),
             enabled: item.enabled !== false,
+            builtin: String(item.builtin || ''),
         }));
 
-    return { regex, css };
+    const groups = (Array.isArray(source.groups) ? source.groups : [])
+        .filter(item => item && typeof item === 'object')
+        .map(item => ({
+            id: String(item.id || createTutuRenderId('grp')),
+            name: String(item.name || '未命名分组'),
+            enabled: item.enabled !== false,
+            bindScenarioIds: normalizeTutuIdList(item.bindScenarioIds),
+        }));
+
+    // 指向已删除分组的正则归为未分组
+    const groupIds = new Set(groups.map(group => group.id));
+    regex.forEach(item => {
+        if (item.groupId && !groupIds.has(item.groupId)) {
+            item.groupId = '';
+        }
+    });
+
+    return { regex, css, groups };
+}
+
+function normalizeTutuIdList(value) {
+    return Array.isArray(value)
+        ? Array.from(new Set(value.map(String).filter(Boolean)))
+        : [];
+}
+
+// ==========================================
+// 小剧场条目 id 与生成内容的来源记录
+// ==========================================
+const CONTENT_SCENARIO_KEY = 'tutu_theater_content_scenarios';
+const CONTENT_SCENARIO_LIMIT = 500;
+
+/**
+ * 给没有 id 的剧本补上稳定 id，绑定渲染正则时依赖它。
+ * 返回是否有改动。
+ */
+function ensureTutuScenarioIds() {
+    if (!Array.isArray(tutuScenarios)) return false;
+
+    let changed = false;
+
+    tutuScenarios.forEach(item => {
+        if (item && typeof item === 'object' && !item.id) {
+            item.id = createTutuRenderId('sc');
+            changed = true;
+        }
+    });
+
+    if (changed) {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(tutuScenarios));
+    }
+
+    return changed;
+}
+
+/**
+ * 根据剧本正文找到对应条目 id。
+ * 手动修改过的情境匹配不到任何条目，返回空字符串。
+ */
+function findTutuScenarioIdByPrompt(prompt) {
+    const text = String(prompt || '').trim();
+
+    if (!text || !Array.isArray(tutuScenarios)) return '';
+
+    ensureTutuScenarioIds();
+
+    const item = tutuScenarios.find(
+        scenario => String(scenario?.prompt || '').trim() === text
+    );
+
+    return item?.id || '';
+}
+
+function hashTutuContent(content) {
+    const text = String(content || '').trim();
+    let h1 = 0x811c9dc5;
+    let h2 = 0;
+
+    for (let i = 0; i < text.length; i++) {
+        const code = text.charCodeAt(i);
+        h1 = Math.imul(h1 ^ code, 16777619);
+        h2 = (Math.imul(h2, 31) + code) | 0;
+    }
+
+    return `${text.length}_${(h1 >>> 0).toString(36)}_${(h2 >>> 0).toString(36)}`;
+}
+
+/**
+ * 记录“这段生成内容来自哪个剧本”。
+ * 面板、嵌入楼层、全屏、收藏都能按内容查回来源，
+ * 不需要在每条调用链上传递 id。
+ */
+function rememberTutuContentScenario(content, scenarioId) {
+    if (!String(content || '').trim()) return;
+
+    const stored = loadLocalJson(CONTENT_SCENARIO_KEY, {});
+    const key = hashTutuContent(content);
+
+    delete stored[key];
+    stored[key] = String(scenarioId || '');
+
+    const keys = Object.keys(stored);
+
+    if (keys.length > CONTENT_SCENARIO_LIMIT) {
+        keys
+            .slice(0, keys.length - CONTENT_SCENARIO_LIMIT)
+            .forEach(oldKey => delete stored[oldKey]);
+    }
+
+    localStorage.setItem(CONTENT_SCENARIO_KEY, JSON.stringify(stored));
+}
+
+function getTutuContentScenarioId(content) {
+    const stored = loadLocalJson(CONTENT_SCENARIO_KEY, {});
+    return String(stored[hashTutuContent(content)] || '');
 }
 
 /**
@@ -1685,7 +1808,32 @@ function runTutuRegexScript(script, text) {
     return runTutuRegexFallback(script, text);
 }
 
-function applyTutuRenderRegex(text) {
+/**
+ * 判断一条渲染正则是否作用于指定剧本：
+ * 1. 正则自身关闭、所属分组关闭 → 不生效
+ * 2. 正则单独绑定了条目 → 只对这些条目生效
+ * 3. 否则分组绑定了条目 → 只对分组绑定的条目生效
+ * 4. 都没绑定 → 全局生效
+ */
+function isTutuRegexActiveFor(script, scenarioId) {
+    if (!script.enabled) return false;
+
+    const group = script.groupId
+        ? tutuRenderLibrary.groups.find(item => item.id === script.groupId)
+        : null;
+
+    if (group && !group.enabled) return false;
+
+    const binding = script.bindScenarioIds?.length
+        ? script.bindScenarioIds
+        : group?.bindScenarioIds || [];
+
+    if (!binding.length) return true;
+
+    return Boolean(scenarioId) && binding.includes(scenarioId);
+}
+
+function applyTutuRenderRegex(text, scenarioId = '') {
     let result = String(text || '');
 
     if (!tutuSettings.renderRegexEnabled) {
@@ -1693,7 +1841,7 @@ function applyTutuRenderRegex(text) {
     }
 
     tutuRenderLibrary.regex
-        .filter(script => script.enabled)
+        .filter(script => isTutuRegexActiveFor(script, scenarioId))
         .forEach(script => {
             try {
                 result = runTutuRegexScript(script, result);
@@ -1748,9 +1896,13 @@ function extractTutuCssText(text) {
  * 源码模式、导出、收藏仍使用原始内容，
  * 只有显示时经过这条管线。
  */
-function buildTutuRenderedContent(content) {
+function buildTutuRenderedContent(content, scenarioId) {
     const raw = String(content || '');
-    const replaced = applyTutuRenderRegex(raw);
+    const finalScenarioId =
+        scenarioId === undefined
+            ? getTutuContentScenarioId(raw)
+            : String(scenarioId || '');
+    const replaced = applyTutuRenderRegex(raw, finalScenarioId);
     const cssText = getTutuRenderCssText();
     const regexChanged = replaced !== raw;
     const isHtml = isProbablyHtml(replaced);
@@ -1759,10 +1911,22 @@ function buildTutuRenderedContent(content) {
         return { html: raw, isHtml: false };
     }
 
+    const autoFit = isTutuAutoFitActive();
+
     const styleTag = cssText
         ? `<style id="tutu-render-css">\n${cssText.replace(/<\/style/gi, '<\\/style')}\n</style>`
         : '';
 
+    let html = buildTutuRenderedDocument(replaced, styleTag, isHtml, regexChanged);
+
+    if (autoFit) {
+        html = injectTutuAutoHeightScript(html);
+    }
+
+    return { html, isHtml: true };
+}
+
+function buildTutuRenderedDocument(replaced, styleTag, isHtml, regexChanged) {
     let html;
 
     if (/<\/head>/i.test(replaced)) {
@@ -1795,7 +1959,197 @@ ${styleTag}
 </html>`;
     }
 
-    return { html, isHtml: true };
+    return html;
+}
+
+// ==========================================
+// 一键自适应：标签夺舍 CSS
+// ==========================================
+const TUTU_AUTOFIT_BUILTIN = 'autofit';
+
+/**
+ * 夺舍所有标签的固定尺寸：
+ * - 宽度一律不超过容器，固定 px 宽度失效
+ * - 100vh / min-height 撑满屏幕的布局改为随内容
+ * - 图片、视频、canvas、svg 等等比缩放
+ * - 长文本、代码块自动换行，不再出现横向滚动条
+ */
+const TUTU_AUTOFIT_CSS = `/* 兔兔小剧场 · 一键自适应（标签夺舍） */
+html, body {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+    height: auto !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    overflow-x: hidden !important;
+    box-sizing: border-box !important;
+}
+
+*, *::before, *::after {
+    box-sizing: border-box !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+}
+
+body * {
+    overflow-wrap: anywhere;
+}
+
+[style*="width"] {
+    max-width: 100% !important;
+}
+
+[style*="vh"], [style*="min-height"] {
+    min-height: 0 !important;
+}
+
+[style*="100vh"], [style*="100dvh"], [style*="100svh"] {
+    height: auto !important;
+}
+
+[style*="position: fixed"], [style*="position:fixed"] {
+    position: absolute !important;
+}
+
+img, video, canvas, svg, picture, iframe, embed, object {
+    max-width: 100% !important;
+    height: auto;
+}
+
+img, video {
+    height: auto !important;
+    object-fit: contain;
+}
+
+table {
+    display: block;
+    width: auto !important;
+    max-width: 100% !important;
+    overflow-x: auto;
+}
+
+pre, code, textarea {
+    white-space: pre-wrap !important;
+    word-break: break-word !important;
+}
+`;
+
+function getTutuAutoFitCssItem() {
+    return tutuRenderLibrary.css.find(
+        item => item.builtin === TUTU_AUTOFIT_BUILTIN
+    ) || null;
+}
+
+function isTutuAutoFitActive() {
+    const item = getTutuAutoFitCssItem();
+    return Boolean(tutuSettings.renderCssEnabled && item?.enabled);
+}
+
+/**
+ * iframe 没有 allow-same-origin，外部读不到内部高度，
+ * 所以在内部注入一段脚本，用 postMessage 把内容高度报给外部。
+ */
+function injectTutuAutoHeightScript(html) {
+    const script = `<script>
+(function () {
+    var last = 0;
+    function report() {
+        var body = document.body;
+        if (!body) return;
+        var height = Math.ceil(Math.max(
+            body.scrollHeight,
+            body.offsetHeight,
+            body.getBoundingClientRect().height
+        ));
+        if (Math.abs(height - last) < 2) return;
+        last = height;
+        parent.postMessage({ type: 'tutu-theater-height', height: height }, '*');
+    }
+    window.addEventListener('load', report);
+    window.addEventListener('resize', report);
+    if (window.ResizeObserver) {
+        new ResizeObserver(report).observe(document.documentElement);
+    }
+    document.addEventListener('DOMContentLoaded', report);
+    setTimeout(report, 50);
+    setTimeout(report, 600);
+})();
+<\/script>`;
+
+    if (/<\/body>/i.test(html)) {
+        return html.replace(/<\/body>(?![\s\S]*<\/body>)/i, `${script}\n</body>`);
+    }
+
+    return `${html}\n${script}`;
+}
+
+/**
+ * 接收 iframe 报来的高度，只调整嵌入楼层 / 面板预览 / 收藏里的 iframe，
+ * 全屏查看保持铺满。
+ */
+function initTutuAutoHeightListener() {
+    if (window.__tutuAutoHeightListener) return;
+    window.__tutuAutoHeightListener = true;
+
+    window.addEventListener('message', event => {
+        const data = event.data;
+
+        if (!data || data.type !== 'tutu-theater-height') return;
+        if (!isTutuAutoFitActive()) return;
+
+        const height = Number(data.height);
+
+        if (!Number.isFinite(height) || height <= 0) return;
+
+        const iframe = Array.from(document.querySelectorAll('iframe')).find(
+            frame => frame.contentWindow === event.source
+        );
+
+        if (!iframe || iframe.classList.contains('tutu-fullscreen-iframe')) return;
+
+        const inTheater = iframe.closest(
+            '.tutu-theater-embed, #tutu_result_preview, .tutu-favorite-card, #tutu_theater_panel'
+        );
+
+        if (!inTheater) return;
+
+        const finalHeight = Math.min(Math.max(height, 40), 20000);
+
+        iframe.style.setProperty('height', `${finalHeight}px`, 'important');
+        iframe.style.setProperty('min-height', '0', 'important');
+    });
+}
+
+/**
+ * 一键添加 / 更新内置自适应 CSS。
+ * 已存在时用最新版本覆盖并重新启用。
+ */
+function applyTutuAutoFitCss() {
+    const existing = getTutuAutoFitCssItem();
+
+    if (existing) {
+        existing.css = TUTU_AUTOFIT_CSS;
+        existing.enabled = true;
+    } else {
+        tutuRenderLibrary.css.unshift({
+            id: createTutuRenderId('css'),
+            name: '一键自适应（标签夺舍）',
+            css: TUTU_AUTOFIT_CSS,
+            source: '内置',
+            enabled: true,
+            builtin: TUTU_AUTOFIT_BUILTIN,
+        });
+    }
+
+    if (!tutuSettings.renderCssEnabled) {
+        tutuSettings.renderCssEnabled = true;
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(tutuSettings));
+    }
+
+    saveTutuRenderLibrary();
+
+    return Boolean(existing);
 }
 
 function renderTutuRenderManager() {
@@ -1850,13 +2204,12 @@ function renderTutuRenderManager() {
         });
     };
 
-    renderList(
-        '#tutu_render_regex_list',
-        'regex',
-        tutuRenderLibrary.regex,
-        item => item.scriptName,
-        item =>
-            `${item.source ? `[${item.source}] ` : ''}${item.findRegex}`
+    renderTutuRenderGroups();
+    renderTutuRenderRegexList();
+
+    $('#tutu_render_autofit_btn').toggleClass(
+        'tutu-render-autofit-on',
+        isTutuAutoFitActive()
     );
 
     renderList(
@@ -1869,17 +2222,312 @@ function renderTutuRenderManager() {
                 .replace(/\s+/g, ' ')
                 .slice(0, 80)}`
     );
+
+    // 绑定面板打开时，规则变化后重新刷新一次目标名称
+    const $bindPanel = $('#tutu_render_bind_panel');
+
+    if ($bindPanel.is(':visible')) {
+        const target = getTutuRenderBindTarget(
+            $bindPanel.attr('data-kind'),
+            $bindPanel.attr('data-id')
+        );
+
+        if (!target) {
+            $bindPanel.hide();
+        }
+    }
+}
+
+function getTutuScenarioNameById(id) {
+    const item = (tutuScenarios || []).find(scenario => scenario?.id === id);
+    return item ? String(item.name || '未命名剧本') : '';
 }
 
 /**
- * 渲染规则变化后，重新渲染面板当前结果。
- * 已嵌入楼层的小剧场会在下次渲染（刷新 / 切换聊天）时生效。
+ * 绑定说明文字：未绑定 / 绑定 N 个条目（显示前几个名称）
+ */
+function describeTutuBinding(ids, emptyText) {
+    if (!ids?.length) return emptyText;
+
+    const names = ids
+        .map(getTutuScenarioNameById)
+        .filter(Boolean);
+    const missing = ids.length - names.length;
+    const preview = names.slice(0, 3).join('、');
+
+    let text = `绑定 ${ids.length} 个条目`;
+
+    if (preview) {
+        text += `：${preview}${names.length > 3 ? '…' : ''}`;
+    }
+
+    if (missing > 0) {
+        text += `（${missing} 个已删除）`;
+    }
+
+    return text;
+}
+
+function renderTutuRenderGroups() {
+    const $list = $('#tutu_render_group_list');
+
+    if (!$list.length) return;
+
+    $list.empty();
+
+    const groups = tutuRenderLibrary.groups;
+
+    if (!groups.length) {
+        $list.append(
+            $('<div class="tutu-render-empty"></div>').text(
+                '还没有分组。分组可整体开关，也可整体绑定小剧场条目。'
+            )
+        );
+        return;
+    }
+
+    groups.forEach(group => {
+        const count = tutuRenderLibrary.regex.filter(
+            item => item.groupId === group.id
+        ).length;
+
+        const $row = $(`
+            <div class="tutu-render-item tutu-render-group-item">
+                <input type="checkbox" class="tutu-render-toggle">
+                <div class="tutu-render-info">
+                    <div class="tutu-render-name"></div>
+                    <div class="tutu-render-detail"></div>
+                </div>
+                <div class="menu_button margin0 tutu-icon-btn tutu-render-bind" title="绑定小剧场条目">
+                    <i class="fa-solid fa-link"></i>
+                </div>
+                <div class="menu_button margin0 tutu-icon-btn tutu-render-group-rename" title="重命名">
+                    <i class="fa-solid fa-pen"></i>
+                </div>
+                <div class="menu_button margin0 tutu-icon-btn tutu-render-delete" title="删除分组（组内正则保留）">
+                    <i class="fa-solid fa-trash-can"></i>
+                </div>
+            </div>
+        `);
+
+        $row.attr({ 'data-kind': 'groups', 'data-id': group.id });
+        $row.toggleClass('tutu-render-bound', group.bindScenarioIds.length > 0);
+        $row.find('.tutu-render-toggle').prop('checked', group.enabled);
+        $row.find('.tutu-render-name').text(`${group.name}（${count}）`);
+        $row.find('.tutu-render-detail').text(
+            describeTutuBinding(group.bindScenarioIds, '全局生效')
+        );
+
+        $list.append($row);
+    });
+}
+
+function renderTutuRenderRegexList() {
+    const $list = $('#tutu_render_regex_list');
+
+    if (!$list.length) return;
+
+    $list.empty();
+
+    const regexList = tutuRenderLibrary.regex;
+
+    if (!regexList.length) {
+        $list.append(
+            $('<div class="tutu-render-empty"></div>').text('还没有渲染正则')
+        );
+        return;
+    }
+
+    // 按分组顺序排列：各分组在前，未分组在后
+    const sections = [
+        ...tutuRenderLibrary.groups.map(group => ({
+            group,
+            items: regexList.filter(item => item.groupId === group.id),
+        })),
+        {
+            group: null,
+            items: regexList.filter(item => !item.groupId),
+        },
+    ].filter(section => section.items.length);
+
+    const showHeaders = tutuRenderLibrary.groups.length > 0;
+
+    sections.forEach(section => {
+        if (showHeaders) {
+            const $header = $('<div class="tutu-render-section-title"></div>');
+
+            $header.text(
+                section.group
+                    ? `📁 ${section.group.name}${section.group.enabled ? '' : '（已关闭）'}`
+                    : '未分组'
+            );
+            $list.append($header);
+        }
+
+        section.items.forEach(item => {
+            const $row = $(`
+                <div class="tutu-render-item">
+                    <input type="checkbox" class="tutu-render-toggle">
+                    <div class="tutu-render-info">
+                        <div class="tutu-render-name"></div>
+                        <div class="tutu-render-detail"></div>
+                        <div class="tutu-render-bind-info"></div>
+                    </div>
+                    <select class="text_pole tutu-render-group-select" title="移动到分组"></select>
+                    <div class="menu_button margin0 tutu-icon-btn tutu-render-bind" title="单独绑定小剧场条目">
+                        <i class="fa-solid fa-link"></i>
+                    </div>
+                    <div class="menu_button margin0 tutu-icon-btn tutu-render-delete" title="删除">
+                        <i class="fa-solid fa-trash-can"></i>
+                    </div>
+                </div>
+            `);
+
+            const $select = $row.find('.tutu-render-group-select');
+
+            $select.append($('<option value=""></option>').text('未分组'));
+            tutuRenderLibrary.groups.forEach(group => {
+                $select.append(
+                    $('<option></option>').val(group.id).text(group.name)
+                );
+            });
+            $select.val(item.groupId || '');
+
+            let bindText;
+
+            if (item.bindScenarioIds.length) {
+                bindText = `🔗 ${describeTutuBinding(item.bindScenarioIds, '')}`;
+            } else if (section.group?.bindScenarioIds.length) {
+                bindText = `跟随分组：${describeTutuBinding(section.group.bindScenarioIds, '')}`;
+            } else {
+                bindText = '全局生效';
+            }
+
+            $row.attr({ 'data-kind': 'regex', 'data-id': item.id });
+            $row.toggleClass('tutu-render-bound', item.bindScenarioIds.length > 0);
+            $row.find('.tutu-render-toggle').prop('checked', item.enabled);
+            $row.find('.tutu-render-name').text(item.scriptName);
+            $row.find('.tutu-render-detail').text(
+                `${item.source ? `[${item.source}] ` : ''}${item.findRegex}`
+            );
+            $row.find('.tutu-render-bind-info').text(bindText);
+
+            $list.append($row);
+        });
+    });
+}
+
+function getTutuRenderBindTarget(kind, id) {
+    if (kind !== 'regex' && kind !== 'groups') return null;
+
+    return (tutuRenderLibrary[kind] || []).find(item => item.id === id) || null;
+}
+
+/**
+ * 打开绑定面板：按分类列出所有剧本条目，可勾选、搜索。
+ */
+function openTutuRenderBindPanel(kind, id) {
+    const target = getTutuRenderBindTarget(kind, id);
+    const $panel = $('#tutu_render_bind_panel');
+
+    if (!target || !$panel.length) return;
+
+    ensureTutuScenarioIds();
+
+    const label = kind === 'groups' ? `分组「${target.name}」` : `正则「${target.scriptName}」`;
+    const selected = new Set(target.bindScenarioIds);
+
+    $panel.attr({ 'data-kind': kind, 'data-id': id });
+    $panel.find('.tutu-render-bind-title').text(`绑定小剧场条目：${label}`);
+    $panel.find('.tutu-render-bind-search').val('');
+
+    const $options = $panel.find('.tutu-render-bind-options').empty();
+    const scenarios = (tutuScenarios || []).filter(item => item?.id);
+
+    if (!scenarios.length) {
+        $options.append(
+            $('<div class="tutu-render-empty"></div>').text('剧本库里还没有条目')
+        );
+    } else {
+        const byCategory = new Map();
+
+        scenarios.forEach(item => {
+            const category = String(item.category || '未分类').trim() || '未分类';
+
+            if (!byCategory.has(category)) byCategory.set(category, []);
+            byCategory.get(category).push(item);
+        });
+
+        byCategory.forEach((items, category) => {
+            const $group = $('<div class="tutu-render-bind-category"></div>');
+            const $title = $(`
+                <label class="tutu-render-bind-category-title">
+                    <input type="checkbox" class="tutu-render-bind-category-check">
+                    <span></span>
+                </label>
+            `);
+
+            $title.find('span').text(category);
+            $group.append($title);
+
+            items.forEach(item => {
+                const $option = $(`
+                    <label class="tutu-render-bind-option">
+                        <input type="checkbox" class="tutu-render-bind-check">
+                        <span></span>
+                    </label>
+                `);
+
+                $option.find('input')
+                    .val(item.id)
+                    .prop('checked', selected.has(item.id));
+                $option.find('span').text(item.name || '未命名剧本');
+                $option.attr('data-search', `${item.name || ''} ${category}`.toLowerCase());
+                $group.append($option);
+            });
+
+            $options.append($group);
+        });
+    }
+
+    syncTutuRenderBindCategoryChecks();
+    $panel.show();
+
+    $panel[0].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+function syncTutuRenderBindCategoryChecks() {
+    $('#tutu_render_bind_panel .tutu-render-bind-category').each(function () {
+        const $checks = $(this).find('.tutu-render-bind-check');
+        const checked = $checks.filter(':checked').length;
+
+        $(this).find('.tutu-render-bind-category-check')
+            .prop('checked', checked > 0 && checked === $checks.length)
+            .prop('indeterminate', checked > 0 && checked < $checks.length);
+    });
+}
+
+/**
+ * 渲染规则变化后，重新渲染面板当前结果和已嵌入楼层。
  */
 function refreshTutuCurrentRender() {
     if (String(tutuCurrentResultContent || '').trim()) {
         const status = $('#tutu_result_status').text();
         showTutuResult(tutuCurrentResultContent);
         $('#tutu_result_status').text(status);
+    }
+
+    try {
+        $('.mes_text .tutu-theater-embed').remove();
+        restoreAllTutuTheaterEmbeds();
+    } catch (error) {
+        console.warn('[兔兔小剧场] 刷新嵌入楼层失败：', error);
+    }
+
+    try {
+        renderTutuFavorites();
+    } catch (error) {
+        console.warn('[兔兔小剧场] 刷新收藏失败：', error);
     }
 }
 // 给旧剧本补充分类字段
@@ -2177,8 +2825,13 @@ localStorage.setItem(
                 type="text"
                 placeholder="例如：thinking, status, 状态栏">
 
+            <label class="tutu-history-option">
+                <input type="checkbox" id="tutu_history_exclude_comments">
+                <span>自动排除注释（&lt;!-- --&gt;、未闭合的注释）</span>
+            </label>
+
             <div class="tutu-api-help">
-                多个标签用逗号分隔，不需要写尖括号。先排除再只读；
+                多个标签用逗号分隔，不需要写尖括号。先排除注释，再排除标签，最后只读；
                 设置了只读标签后，没有包含这些标签的 AI 消息会被跳过，用户消息保留原文。
             </div>
         </div>
@@ -2817,12 +3470,68 @@ localStorage.setItem(
                 <span>启用渲染正则</span>
             </label>
 
+            <div class="tutu-render-subtitle">正则分组</div>
+
+            <div id="tutu_render_group_list" class="tutu-render-list"></div>
+
+            <div class="tutu-render-inline">
+                <input
+                    id="tutu_render_group_name"
+                    class="text_pole"
+                    placeholder="新分组名称">
+                <button
+                    type="button"
+                    id="tutu_render_group_add_btn"
+                    class="menu_button">
+                    <i class="fa-solid fa-folder-plus"></i>
+                    新建分组
+                </button>
+            </div>
+
+            <div class="tutu-render-subtitle">渲染正则</div>
+
             <div id="tutu_render_regex_list" class="tutu-render-list"></div>
+
+            <div id="tutu_render_bind_panel" class="tutu-render-bind-panel" style="display:none;">
+                <div class="tutu-render-bind-title"></div>
+                <input
+                    class="text_pole tutu-render-bind-search"
+                    placeholder="搜索剧本名称 / 分类">
+                <div class="tutu-render-bind-options"></div>
+                <div class="tutu-appearance-actions">
+                    <button type="button" class="menu_button tutu-render-bind-save">
+                        <i class="fa-solid fa-check"></i>
+                        保存绑定
+                    </button>
+                    <button type="button" class="menu_button tutu-render-bind-clear">
+                        <i class="fa-solid fa-globe"></i>
+                        解除绑定
+                    </button>
+                    <button type="button" class="menu_button tutu-render-bind-cancel">
+                        取消
+                    </button>
+                </div>
+                <div class="tutu-api-help">
+                    绑定后只在这些剧本生成的小剧场上生效；不绑定则全局生效。
+                    正则单独绑定优先于分组绑定。手动输入、未匹配到剧本的情境不会触发绑定规则。
+                </div>
+            </div>
 
             <label class="tutu-history-option">
                 <input type="checkbox" id="tutu_render_css_enabled">
                 <span>启用渲染 CSS</span>
             </label>
+
+            <div class="tutu-appearance-actions">
+                <button
+                    type="button"
+                    id="tutu_render_autofit_btn"
+                    class="menu_button"
+                    title="添加内置 CSS：夺舍所有标签的固定宽高，并让小剧场高度随内容自动调整">
+                    <i class="fa-solid fa-up-right-and-down-left-from-center"></i>
+                    一键自适应（标签夺舍）
+                </button>
+            </div>
 
             <div id="tutu_render_css_list" class="tutu-render-list"></div>
 
@@ -2853,6 +3562,7 @@ localStorage.setItem(
                 源码、导出和发给 AI 的内容保持原样。
                 预设正则可在“导入”页选择“预设绑定正则”导入；
                 预设或世界书里的 CSS 条目可选择“导入为渲染 CSS”。
+                “一键自适应”会强制覆盖内容里的固定宽度 / 满屏高度，并让嵌入楼层、面板预览、收藏的高度随内容伸缩。
             </div>
         </div>
 
@@ -3287,6 +3997,15 @@ const tutuPanel = document.getElementById('tutu_theater_panel');
 
 if (tutuPanel && tutuPanel.parentElement !== document.body) {
     document.body.appendChild(tutuPanel);
+}
+
+/*
+ * 启动时强制隐藏面板，只有点击菜单「兔兔小剧场」才打开。
+ * 避免主题 / 自定义 CSS 里的 display 覆盖默认隐藏，导致每次启动都弹出。
+ */
+if (tutuPanel) {
+    tutuPanel.style.cssText = 'display:none;';
+    tutuPanel.classList.remove('tutu-mobile-mode');
 }
 
 
@@ -5786,6 +6505,11 @@ function loadTutuCharacterOptionsToUI() {
         tutuSettings.historyExcludeTags || ''
     );
 
+    $('#tutu_history_exclude_comments').prop(
+        'checked',
+        tutuSettings.historyExcludeComments !== false
+    );
+
     if (tutuCurrentCharacterContext.includeHistory) {
         $('#tutu_history_limit_box').show();
     } else {
@@ -5951,7 +6675,9 @@ function getTutuHistoryText() {
                 );
 
             const content = filterTutuHistoryContent(
-                rawContent,
+                tutuSettings.historyExcludeComments !== false
+                    ? stripTutuHtmlComments(rawContent)
+                    : rawContent,
                 includeTags,
                 excludeTags,
                 Boolean(message.is_user)
@@ -5981,6 +6707,19 @@ function parseTutuTagList(value) {
         .split(/[,，、\s]+/)
         .map(tag => tag.replace(/[<>/]/g, '').trim())
         .filter(tag => /^[\w\u4e00-\u9fa5:.-]+$/.test(tag));
+}
+
+/**
+ * 删除 HTML 注释：
+ * - 完整的 <!-- ... -->（含多行）
+ * - 末尾未闭合的 <!-- ...（流式输出被截断时常见）
+ * - 残留的 --> 结束符
+ */
+function stripTutuHtmlComments(text) {
+    return String(text || '')
+        .replace(/<!--[\s\S]*?-->/g, '')
+        .replace(/<!--[\s\S]*$/, '')
+        .replace(/-->/g, '');
 }
 
 function escapeTutuTagName(tag) {
@@ -6262,6 +7001,7 @@ function getAutoGenerationScenario() {
 async function runTutuGeneration({
     scenario = '',
     isAutomatic = false,
+    scenarioId = '',
 } = {}) {
     if (tutuIsGenerating) {
         return;
@@ -6284,6 +7024,16 @@ async function runTutuGeneration({
 
     tutuIsGenerating = true;
 
+    // 本次生成的令牌：取消后旧请求即使返回也会被丢弃
+    const generationToken = {
+        cancelled: false,
+        controller:
+            typeof AbortController === 'function'
+                ? new AbortController()
+                : null,
+    };
+    tutuCurrentGeneration = generationToken;
+
     const provider =
         $('#tutu_api_provider').val() || 'main';
 
@@ -6301,9 +7051,7 @@ async function runTutuGeneration({
 
     $('#tutu_result_source').text('');
 
-    $('#tutu_generate_btn')
-        .addClass('disabled')
-        .attr('title', '正在生成……');
+    setTutuGenerateButtonState(true);
 
     try {
 await refreshTutuCharacterContext();
@@ -6317,20 +7065,43 @@ const aiPrompt =
 
         let result;
 
-        if (provider === 'secondary') {
-            result =
-                await generateBySecondaryApi(aiPrompt);
-        } else {
-            result = await generateRaw({
-                prompt: aiPrompt,
-                quietToLoud: false,
-                isImpersonate: false,
-            });
+        if (generationToken.cancelled) {
+            throw createTutuCancelError();
         }
 
-// 在 try 块中，替换 showTutuResult(result) 部分为：
+        if (provider === 'secondary') {
+            result =
+                await generateBySecondaryApi(
+                    aiPrompt,
+                    generationToken.controller?.signal
+                );
+        } else {
+            /*
+             * generateRaw 本身不接收 signal，
+             * 取消时调用酒馆的 stopGeneration 中断，
+             * 同时用 Promise.race 让面板立即恢复。
+             */
+            result = await Promise.race([
+                generateRaw({
+                    prompt: aiPrompt,
+                    quietToLoud: false,
+                    isImpersonate: false,
+                }),
+                waitTutuGenerationCancel(generationToken),
+            ]);
+        }
+
+        if (generationToken.cancelled) {
+            throw createTutuCancelError();
+        }
 
         result = cleanGeneratedContent(result);
+
+        // 记录内容来源剧本，供绑定条目的渲染正则使用
+        rememberTutuContentScenario(
+            result,
+            scenarioId || findTutuScenarioIdByPrompt(scenario)
+        );
 
         // ★ 根据输出方式决定结果去向
         const outputMode = tutuSettings.outputMode || 'panel';
@@ -6372,6 +7143,26 @@ if (outputMode === 'embed') {
     );
 }
 } catch (error) {
+    if (generationToken.cancelled || isTutuCancelError(error)) {
+        $('#tutu_result_status').text('已取消生成。');
+
+        $('#tutu_result_preview').html(`
+            <div class="tutu-result-placeholder">
+                已取消生成。
+            </div>
+        `);
+
+        $('#tutu_result_source').text('');
+
+        // 取消前面板上有结果时恢复显示
+        if (String(tutuCurrentResultContent || '').trim()) {
+            showTutuResult(tutuCurrentResultContent);
+            $('#tutu_result_status').text('已取消生成，显示上一次的结果。');
+        }
+
+        return;
+    }
+
     console.error(
         '小剧场生成失败：',
         error
@@ -6415,12 +7206,95 @@ if (outputMode === 'embed') {
     );
 
 } finally {
-        tutuIsGenerating = false;
-
-        $('#tutu_generate_btn')
-            .removeClass('disabled')
-            .attr('title', '生成小剧场');
+        // 只有当前这次生成才复位，避免影响取消后新开的生成
+        if (tutuCurrentGeneration === generationToken) {
+            tutuIsGenerating = false;
+            tutuCurrentGeneration = null;
+            setTutuGenerateButtonState(false);
+        }
     }
+}
+
+// ==========================================
+// 取消生成
+// ==========================================
+function createTutuCancelError() {
+    const error = new Error('已取消生成');
+    error.name = 'TutuCancelError';
+    return error;
+}
+
+function isTutuCancelError(error) {
+    return error?.name === 'TutuCancelError' || error?.name === 'AbortError';
+}
+
+function waitTutuGenerationCancel(token) {
+    return new Promise((_, reject) => {
+        if (token.cancelled) {
+            reject(createTutuCancelError());
+            return;
+        }
+
+        token.onCancel = () => reject(createTutuCancelError());
+    });
+}
+
+function setTutuGenerateButtonState(isGenerating) {
+    const $button = $('#tutu_generate_btn');
+
+    $button
+        .removeClass('disabled')
+        .toggleClass('tutu-generating', isGenerating)
+        .attr({
+            title: isGenerating ? '取消生成' : '生成小剧场',
+            'aria-label': isGenerating ? '取消生成' : '生成小剧场',
+        });
+
+    $button.find('i')
+        .toggleClass('fa-wand-magic-sparkles', !isGenerating)
+        .toggleClass('fa-stop', isGenerating);
+
+    $('#tutu_random_script_btn').toggleClass('disabled', isGenerating);
+}
+
+/**
+ * 取消当前生成：
+ * - 副 API：AbortController 中断 fetch
+ * - 主 API：调用酒馆 stopGeneration 中断 generateRaw
+ * 立即复位面板，旧请求晚到的结果会被丢弃。
+ */
+function cancelTutuGeneration() {
+    const token = tutuCurrentGeneration;
+
+    if (!token || token.cancelled) return;
+
+    token.cancelled = true;
+
+    try {
+        token.controller?.abort();
+    } catch (error) {
+        console.warn('[兔兔小剧场] 中断副 API 请求失败：', error);
+    }
+
+    try {
+        const context = SillyTavern.getContext();
+
+        if (typeof context.stopGeneration === 'function') {
+            context.stopGeneration();
+        } else {
+            $('#mes_stop:visible').trigger('click');
+        }
+    } catch (error) {
+        console.warn('[兔兔小剧场] 中断主 API 生成失败：', error);
+    }
+
+    token.onCancel?.();
+
+    tutuIsGenerating = false;
+    tutuCurrentGeneration = null;
+    setTutuGenerateButtonState(false);
+
+    toastr.info('已取消生成', '兔兔小剧场');
 }
 function getTutuLatestMessageKey() {
     const context =
@@ -7267,7 +8141,7 @@ if (!response.ok) {
     }
 }
 
-async function generateBySecondaryApi(prompt) {
+async function generateBySecondaryApi(prompt, signal) {
     const endpointInput =
         $('#tutu_secondary_endpoint').val().trim();
 
@@ -7310,6 +8184,7 @@ const model = String($('#tutu_secondary_model').val() || '').trim();
             ],
             temperature: 0.8,
         }),
+        signal,
     });
 
     const responseText = await response.text();
@@ -7454,6 +8329,9 @@ historyIncludeTags:
 
 historyExcludeTags:
     String(tutuSettings.historyExcludeTags || ''),
+
+historyExcludeComments:
+    tutuSettings.historyExcludeComments !== false,
 
     };
 
@@ -9175,6 +10053,9 @@ function renderTutuStylePresetSelects() {
 }
 
 function renderLibrary() {
+    // 导入 / 新建的剧本统一补 id
+    ensureTutuScenarioIds();
+
     const $list = $('#tutu_library_list');
 
     if (!$list.length) {
@@ -11002,6 +11883,7 @@ $(document).on(
         runTutuGeneration({
             scenario: scenario.prompt || '',
             isAutomatic: false,
+            scenarioId: scenario.id || '',
         });
     }
 );
@@ -11104,13 +11986,16 @@ $(document).on(
 // 历史聊天记录：只读标签 / 排除标签（全局保存）
 $(document).on(
     'change',
-    '#tutu_history_include_tags, #tutu_history_exclude_tags',
+    '#tutu_history_include_tags, #tutu_history_exclude_tags, #tutu_history_exclude_comments',
     function () {
         tutuSettings.historyIncludeTags =
             String($('#tutu_history_include_tags').val() || '').trim();
 
         tutuSettings.historyExcludeTags =
             String($('#tutu_history_exclude_tags').val() || '').trim();
+
+        tutuSettings.historyExcludeComments =
+            $('#tutu_history_exclude_comments').is(':checked');
 
         localStorage.setItem(
             SETTINGS_KEY,
@@ -11166,13 +12051,181 @@ $(document).on('click', '.tutu-render-delete', function () {
     if (!item) return;
 
     const label = kind === 'regex' ? item.scriptName : item.name;
+    const tip = kind === 'groups'
+        ? `确定删除分组「${label}」吗？组内正则会移到“未分组”。`
+        : `确定删除「${label}」吗？`;
 
-    if (!confirm(`确定删除「${label}」吗？`)) return;
+    if (!confirm(tip)) return;
 
     tutuRenderLibrary[kind] = list.filter(entry => entry.id !== id);
+
+    if (kind === 'groups') {
+        tutuRenderLibrary.regex.forEach(entry => {
+            if (entry.groupId === id) entry.groupId = '';
+        });
+    }
+
+    if ($('#tutu_render_bind_panel').attr('data-id') === id) {
+        $('#tutu_render_bind_panel').hide();
+    }
+
     saveTutuRenderLibrary();
     renderTutuRenderManager();
     refreshTutuCurrentRender();
+});
+
+// 新建正则分组
+$(document).on('click', '#tutu_render_group_add_btn', function () {
+    const name =
+        String($('#tutu_render_group_name').val() || '').trim() ||
+        `分组 ${tutuRenderLibrary.groups.length + 1}`;
+
+    tutuRenderLibrary.groups.push({
+        id: createTutuRenderId('grp'),
+        name,
+        enabled: true,
+        bindScenarioIds: [],
+    });
+
+    saveTutuRenderLibrary();
+    renderTutuRenderManager();
+
+    $('#tutu_render_group_name').val('');
+    toastr.success(`已新建分组「${name}」`);
+});
+
+$(document).on('keydown', '#tutu_render_group_name', function (event) {
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        $('#tutu_render_group_add_btn').trigger('click');
+    }
+});
+
+// 重命名分组
+$(document).on('click', '.tutu-render-group-rename', function () {
+    const id = String($(this).closest('.tutu-render-item').attr('data-id'));
+    const group = tutuRenderLibrary.groups.find(item => item.id === id);
+
+    if (!group) return;
+
+    const name = window.prompt('分组名称：', group.name);
+
+    if (name === null || !name.trim()) return;
+
+    group.name = name.trim();
+    saveTutuRenderLibrary();
+    renderTutuRenderManager();
+});
+
+// 正则移动到分组
+$(document).on('change', '.tutu-render-group-select', function () {
+    const id = String($(this).closest('.tutu-render-item').attr('data-id'));
+    const item = tutuRenderLibrary.regex.find(entry => entry.id === id);
+
+    if (!item) return;
+
+    item.groupId = String($(this).val() || '');
+    saveTutuRenderLibrary();
+    renderTutuRenderManager();
+    refreshTutuCurrentRender();
+});
+
+// 打开绑定面板
+$(document).on('click', '.tutu-render-bind', function () {
+    const $row = $(this).closest('.tutu-render-item');
+
+    openTutuRenderBindPanel(
+        String($row.attr('data-kind')),
+        String($row.attr('data-id'))
+    );
+});
+
+$(document).on('input', '#tutu_render_bind_panel .tutu-render-bind-search', function () {
+    const keyword = String($(this).val() || '').trim().toLowerCase();
+
+    $('#tutu_render_bind_panel .tutu-render-bind-option').each(function () {
+        const text = String($(this).attr('data-search') || '');
+        $(this).toggle(!keyword || text.includes(keyword));
+    });
+
+    $('#tutu_render_bind_panel .tutu-render-bind-category').each(function () {
+        $(this).toggle(
+            $(this).find('.tutu-render-bind-option').filter(function () {
+                return $(this).css('display') !== 'none';
+            }).length > 0
+        );
+    });
+});
+
+$(document).on('change', '#tutu_render_bind_panel .tutu-render-bind-category-check', function () {
+    $(this)
+        .closest('.tutu-render-bind-category')
+        .find('.tutu-render-bind-option:visible .tutu-render-bind-check')
+        .prop('checked', $(this).is(':checked'));
+
+    syncTutuRenderBindCategoryChecks();
+});
+
+$(document).on('change', '#tutu_render_bind_panel .tutu-render-bind-check', function () {
+    syncTutuRenderBindCategoryChecks();
+});
+
+function saveTutuRenderBinding(ids) {
+    const $panel = $('#tutu_render_bind_panel');
+    const target = getTutuRenderBindTarget(
+        $panel.attr('data-kind'),
+        $panel.attr('data-id')
+    );
+
+    if (!target) {
+        $panel.hide();
+        return;
+    }
+
+    target.bindScenarioIds = normalizeTutuIdList(ids);
+
+    saveTutuRenderLibrary();
+    $panel.hide();
+    renderTutuRenderManager();
+    refreshTutuCurrentRender();
+
+    toastr.success(
+        target.bindScenarioIds.length
+            ? `已绑定 ${target.bindScenarioIds.length} 个小剧场条目`
+            : '已解除绑定，改为全局生效'
+    );
+}
+
+$(document).on('click', '#tutu_render_bind_panel .tutu-render-bind-save', function () {
+    const ids = $('#tutu_render_bind_panel .tutu-render-bind-check:checked')
+        .map(function () {
+            return String($(this).val());
+        })
+        .get();
+
+    saveTutuRenderBinding(ids);
+});
+
+$(document).on('click', '#tutu_render_bind_panel .tutu-render-bind-clear', function () {
+    saveTutuRenderBinding([]);
+});
+
+$(document).on('click', '#tutu_render_bind_panel .tutu-render-bind-cancel', function () {
+    $('#tutu_render_bind_panel').hide();
+});
+
+// 一键自适应（标签夺舍）
+$(document).on('click', '#tutu_render_autofit_btn', function () {
+    const updated = applyTutuAutoFitCss();
+
+    renderTutuRenderManager();
+    refreshTutuCurrentRender();
+
+    toastr.success(
+        updated
+            ? '自适应 CSS 已更新并启用'
+            : '已添加自适应 CSS，小剧场会自动适配宽度和高度'
+    );
 });
 
 $(document).on('click', '#tutu_render_css_add_btn', function () {
@@ -11206,6 +12259,8 @@ $(document).on('click', '#tutu_render_css_add_btn', function () {
 });
 
 loadTutuSettingsToUI();
+ensureTutuScenarioIds();
+initTutuAutoHeightListener();
 renderTutuRenderManager();
 renderTutuCategorySelects();
 renderTutuImportCategorySelect();
@@ -11437,6 +12492,8 @@ $('#tutu_import_selected_btn').on(
                     substituteRegex: Number(script.substituteRegex) || 0,
                     source: presetName,
                     enabled: !script.disabled,
+                    groupId: '',
+                    bindScenarioIds: [],
                 };
 
                 // 同预设、同名的正则覆盖更新，避免重复导入
@@ -11447,7 +12504,11 @@ $('#tutu_import_selected_btn').on(
                 );
 
                 if (oldIndex >= 0) {
-                    record.id = tutuRenderLibrary.regex[oldIndex].id;
+                    const old = tutuRenderLibrary.regex[oldIndex];
+                    // 覆盖更新时保留分组和条目绑定
+                    record.id = old.id;
+                    record.groupId = old.groupId || '';
+                    record.bindScenarioIds = old.bindScenarioIds || [];
                     tutuRenderLibrary.regex[oldIndex] = record;
                 } else {
                     tutuRenderLibrary.regex.push(record);
@@ -11708,6 +12769,11 @@ const prompt =
     }
 
 const newScript = {
+    // 编辑时保留原 id，渲染正则的条目绑定才不会失效
+    id:
+        (editingScriptIndex !== -1 &&
+            tutuScenarios[editingScriptIndex]?.id) ||
+        createTutuRenderId('sc'),
     name,
     desc,
     category,
@@ -11831,6 +12897,12 @@ $(document).on(
     'click',
     '#tutu_generate_btn',
     function () {
+        // 生成中再次点击 = 取消生成
+        if (tutuIsGenerating) {
+            cancelTutuGeneration();
+            return;
+        }
+
         const scenario = String(
             $('#tutu_prompt').val() || ''
         ).trim();

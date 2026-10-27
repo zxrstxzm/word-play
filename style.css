@@ -696,6 +696,11 @@
     display: flex !important;
 }
 
+/* 未通过点击打开时一律隐藏，防止主题 / 自定义 CSS 让面板启动即弹出 */
+#tutu_theater_panel:not([style*="display: flex"]):not([style*="display:flex"]) {
+    display: none !important;
+}
+
 /* =========================
    2. 顶部标签栏 (Ins 极简风)
    ========================= */
@@ -1482,6 +1487,26 @@
     opacity: 0.4;
     pointer-events: none;
     box-shadow: none;
+}
+
+/* 生成中：生成按钮变为取消按钮 */
+#tutu_theater_panel #tutu_generate_btn.tutu-generating {
+    color: #fff;
+    background: #d9534f;
+    border-color: #c9302c;
+    box-shadow: 0 0 0 0 rgba(217, 83, 79, 0.5);
+    animation: tutu-generating-pulse 1.4s ease-out infinite;
+}
+
+@keyframes tutu-generating-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(217, 83, 79, 0.5); }
+    100% { box-shadow: 0 0 0 8px rgba(217, 83, 79, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    #tutu_theater_panel #tutu_generate_btn.tutu-generating {
+        animation: none;
+    }
 }
 
 
@@ -5277,4 +5302,137 @@ details.tutu-captured-element > .tutu-capture-actions-bar {
     font-size: 0.85em;
     opacity: 0.6;
     padding: 4px 2px;
+}
+
+/* 分组 / 绑定 */
+.tutu-render-subtitle {
+    margin-top: 4px;
+    font-size: 0.9em;
+    font-weight: bold;
+    opacity: 0.8;
+}
+
+.tutu-render-inline {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.tutu-render-inline .text_pole {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+}
+
+.tutu-render-inline .menu_button {
+    flex-shrink: 0;
+    margin: 0;
+    white-space: nowrap;
+}
+
+.tutu-render-section-title {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    padding: 3px 4px;
+    font-size: 0.8em;
+    font-weight: bold;
+    opacity: 0.75;
+    background: var(--SmartThemeBlurTintColor);
+}
+
+.tutu-render-bind-info {
+    font-size: 0.75em;
+    opacity: 0.6;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tutu-render-bound {
+    border-color: var(--SmartThemeQuoteColor);
+}
+
+.tutu-render-bound .tutu-render-bind-info,
+.tutu-render-bound .tutu-render-bind {
+    color: var(--SmartThemeQuoteColor);
+    opacity: 1;
+}
+
+.tutu-render-group-select {
+    flex: 0 0 auto;
+    width: 92px;
+    min-width: 0;
+    margin: 0;
+    padding: 2px 4px;
+    font-size: 0.8em;
+}
+
+.tutu-render-bind-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid var(--SmartThemeQuoteColor);
+    border-radius: 6px;
+    background: var(--SmartThemeBlurTintColor);
+}
+
+.tutu-render-bind-title {
+    font-weight: bold;
+    overflow-wrap: anywhere;
+}
+
+.tutu-render-bind-search {
+    margin: 0;
+}
+
+.tutu-render-bind-options {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 260px;
+    overflow-y: auto;
+}
+
+.tutu-render-bind-category {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.tutu-render-bind-category-title,
+.tutu-render-bind-option {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+}
+
+.tutu-render-bind-category-title {
+    font-weight: bold;
+    font-size: 0.9em;
+}
+
+.tutu-render-bind-option {
+    padding-left: 20px;
+    font-size: 0.9em;
+}
+
+.tutu-render-bind-option span,
+.tutu-render-bind-category-title span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+#tutu_render_autofit_btn.tutu-render-autofit-on {
+    border-color: var(--SmartThemeQuoteColor);
+    color: var(--SmartThemeQuoteColor);
+}
+
+@media (max-width: 600px) {
+    .tutu-render-group-select {
+        width: 72px;
+    }
 }
