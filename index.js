@@ -28,7 +28,8 @@ jQuery(async () => {
     // 0. 数据存储管理 (LocalStorage)
     // ==========================================
 async function injectTutuRegex() {
-    const REGEX_SCRIPT_NAME = '🐰兔兔小剧场过滤';
+    const REGEX_SCRIPT_NAME = '🐱克制放映室过滤';
+    const LEGACY_REGEX_SCRIPT_NAME = '🐰兔兔小剧场过滤';
 
     const tutuRegexScript = {
         /*
@@ -115,8 +116,10 @@ async function injectTutuRegex() {
         /*
          * 查找已有同名正则。
          */
+        // 兼容改名前写入的旧正则，找到后原地改名，不重复添加
         const existingIndex = regexScripts.findIndex(script => {
-            return script?.scriptName === REGEX_SCRIPT_NAME;
+            return script?.scriptName === REGEX_SCRIPT_NAME ||
+                script?.scriptName === LEGACY_REGEX_SCRIPT_NAME;
         });
 
         if (existingIndex >= 0) {
@@ -130,10 +133,11 @@ async function injectTutuRegex() {
                 ...tutuRegexScript,
                 ...regexScripts[existingIndex],
                 id: oldId || tutuRegexScript.id,
+                scriptName: REGEX_SCRIPT_NAME,
             };
 
             console.log(
-                '[兔兔小剧场] 全局正则已存在，已更新'
+                '[克制放映室] 全局正则已存在，已更新'
             );
         } else {
             /*
@@ -143,7 +147,7 @@ async function injectTutuRegex() {
             regexScripts.push(tutuRegexScript);
 
             console.log(
-                '[兔兔小剧场] 已注入 extension_settings.regex'
+                '[克制放映室] 已注入 extension_settings.regex'
             );
         }
 
@@ -159,7 +163,7 @@ async function injectTutuRegex() {
         saveSettingsDebounced();
 
         console.log(
-            '[兔兔小剧场] 当前全局正则数组：',
+            '[克制放映室] 当前全局正则数组：',
             extension_settings.regex
         );
 
@@ -170,7 +174,7 @@ async function injectTutuRegex() {
 
     } catch (error) {
         console.error(
-            '[兔兔小剧场] 注入全局正则失败：',
+            '[克制放映室] 注入全局正则失败：',
             error
         );
     }
@@ -675,7 +679,7 @@ function getCurrentTutuCharacterAvatar() {
         ).trim();
     } catch (error) {
         console.warn(
-            '[兔兔小剧场] 获取当前角色头像失败：',
+            '[克制放映室] 获取当前角色头像失败：',
             error
         );
 
@@ -723,7 +727,7 @@ function findTutuCharacterAvatarByName(characterName) {
         ).trim();
     } catch (error) {
         console.warn(
-            '[兔兔小剧场] 按角色名称查找头像失败：',
+            '[克制放映室] 按角色名称查找头像失败：',
             error
         );
 
@@ -1439,6 +1443,8 @@ tutuSettings = {
     activeAuxPromptIds: null,   // { jailbreak: [], style: [], extra: [] }，null 时从旧字段迁移
     // 生成格式：text 纯文本（自动适配排版） / html 交互网页
     outputFormat: 'text',
+    // 副 API 最大输出长度（max_tokens），0 = 不发送
+    secondaryMaxTokens: 0,
     // 自定义 HTML 生成要求，留空使用内置版本
     htmlPromptCustom: '',
     auxPromptsEnabled: false,
@@ -1527,7 +1533,7 @@ function persistTutuSettings() {
     try {
         localStorage.setItem(SETTINGS_KEY, JSON.stringify(tutuSettings));
     } catch (error) {
-        console.warn('[兔兔小剧场] 保存设置失败：', error);
+        console.warn('[克制放映室] 保存设置失败：', error);
     }
 }
 
@@ -1753,7 +1759,7 @@ function parseTutuRegexString(input) {
 
         return new RegExp(value, 'g');
     } catch (error) {
-        console.warn('[兔兔小剧场] 正则无效：', value, error);
+        console.warn('[克制放映室] 正则无效：', value, error);
         return null;
     }
 }
@@ -1885,7 +1891,7 @@ function runTutuRegexScript(script, text) {
             }
         } catch (error) {
             console.warn(
-                '[兔兔小剧场] 酒馆正则引擎执行失败，改用内置实现：',
+                '[克制放映室] 酒馆正则引擎执行失败，改用内置实现：',
                 error
             );
         }
@@ -1933,7 +1939,7 @@ function applyTutuRenderRegex(text, scenarioId = '') {
                 result = runTutuRegexScript(script, result);
             } catch (error) {
                 console.warn(
-                    `[兔兔小剧场] 正则「${script.scriptName}」执行失败：`,
+                    `[克制放映室] 正则「${script.scriptName}」执行失败：`,
                     error
                 );
             }
@@ -2871,7 +2877,7 @@ function buildTutuTypographyIframeCss() {
 
 /**
  * 页面上不走 iframe 的纯文本排版样式：
- * - .tutu-typo-plain：兔兔用 textContent 显示的原文（面板预览、嵌入楼层、全屏、收藏），保留换行
+ * - .tutu-typo-plain：用 textContent 显示的原文（面板预览、嵌入楼层、全屏、收藏），保留换行
  * - .tutu-typo-rendered：捕捉标签里由酒馆渲染过的纯文本（换行已转成 <br>/<p>）
  * HTML 小剧场不会带这两个类。
  */
@@ -2953,7 +2959,7 @@ const TUTU_AUTOFIT_BUILTIN = 'autofit';
  * - 图片、视频、canvas、svg 等等比缩放
  * - 长文本、代码块自动换行，不再出现横向滚动条
  */
-const TUTU_AUTOFIT_CSS = `/* 兔兔小剧场 · 一键自适应（标签夺舍） */
+const TUTU_AUTOFIT_CSS = `/* 克制放映室 · 一键自适应（标签夺舍） */
 html, body {
     width: 100% !important;
     max-width: 100% !important;
@@ -3520,13 +3526,13 @@ function refreshTutuCurrentRender() {
         $('.mes_text .tutu-theater-embed').remove();
         restoreAllTutuTheaterEmbeds();
     } catch (error) {
-        console.warn('[兔兔小剧场] 刷新嵌入楼层失败：', error);
+        console.warn('[克制放映室] 刷新嵌入楼层失败：', error);
     }
 
     try {
         renderTutuFavorites();
     } catch (error) {
-        console.warn('[兔兔小剧场] 刷新收藏失败：', error);
+        console.warn('[克制放映室] 刷新收藏失败：', error);
     }
 }
 // 给旧剧本补充分类字段
@@ -3614,8 +3620,8 @@ localStorage.setItem(
     // ==========================================
     const menuButtonHtml = `
         <div id="option_tutu_theater" class="list-group-item flex-container flexGap5 interactable" title="生成外置小剧场" tabindex="0" role="listitem">
-            <div class="fa-fw fa-solid fa-carrot extensionsMenuExtensionButton"></div>
-            <span>兔兔小剧场</span>
+            <div class="fa-fw fa-solid fa-paw extensionsMenuExtensionButton"></div>
+            <span>克制放映室</span>
         </div>
     `;
 
@@ -3626,7 +3632,7 @@ localStorage.setItem(
             
             <!-- 头部 -->
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                <h3 style="margin: 0; font-size: 1.3em;">🐰 兔兔小剧场</h3>
+                <h3 style="margin: 0; font-size: 1.3em;">🐱 克制放映室</h3>
                 <div id="tutu_close" class="fa-solid fa-xmark interactable hoverglow" title="关闭" style="font-size: 1.5em; cursor: pointer;"></div>
             </div>
             
@@ -4096,7 +4102,7 @@ localStorage.setItem(
             class="text_pole">
 
             <option value="tutu_json">
-                兔兔小剧场 JSON
+                克制放映室 JSON
             </option>
 
             <option value="st_preset">
@@ -4125,7 +4131,7 @@ localStorage.setItem(
             class="menu_button">
 
             <i class="fa-solid fa-file-import"></i>
-            导入兔兔 JSON
+            导入克制 JSON
         </button>
 
         <input
@@ -4136,9 +4142,9 @@ localStorage.setItem(
     </div>
 
     <div class="tutu-api-help">
-        兔兔 JSON 会完整保存分类、剧本名称、简介和正文。
+        克制 JSON 会完整保存分类、剧本名称、简介和正文。
         <br>
-        导入功能只接受兔兔小剧场 JSON，不会把 SillyTavern 预设或世界书误导入剧本库。
+        导入功能只接受克制放映室 JSON，不会把 SillyTavern 预设或世界书误导入剧本库。
     </div>
 </div>
 
@@ -4760,7 +4766,7 @@ localStorage.setItem(
 
 <select id="tutu_output_mode" class="text_pole">
     <option value="panel">
-        在兔兔小剧场面板内预览
+        在克制放映室面板内预览
     </option>
     <option value="embed">
         嵌入到最新 AI 回复楼层底部
@@ -4871,6 +4877,33 @@ localStorage.setItem(
     </div>
 </div>
 
+
+            <label class="tutu-settings-label" for="tutu_secondary_max_tokens">
+                最大输出长度（tokens）
+            </label>
+
+            <div class="tutu-max-tokens-row">
+                <input
+                    id="tutu_secondary_max_tokens"
+                    class="text_pole"
+                    type="number"
+                    min="0"
+                    max="200000"
+                    step="256"
+                    inputmode="numeric"
+                    placeholder="留空 = 不发送，用接口默认值">
+                <div class="tutu-max-tokens-presets" role="group" aria-label="快捷填入">
+                    <button type="button" class="menu_button margin0 tutu-max-tokens-preset" data-value="4096">4K</button>
+                    <button type="button" class="menu_button margin0 tutu-max-tokens-preset" data-value="8192">8K</button>
+                    <button type="button" class="menu_button margin0 tutu-max-tokens-preset" data-value="16384">16K</button>
+                    <button type="button" class="menu_button margin0 tutu-max-tokens-preset" data-value="">清空</button>
+                </div>
+            </div>
+
+            <div class="tutu-api-help">
+                作为 <code>max_tokens</code> 发送。纯文本 4K 左右够用，HTML 建议 8K–16K；
+                不能超过模型本身的输出上限，否则接口会报错。只对副 API 生效，主 API 的长度在酒馆「回复长度」里调。
+            </div>
 
             <div class="tutu-api-help">
                 副 API 需要兼容 OpenAI Chat Completions 格式。
@@ -5188,7 +5221,7 @@ if (tutuPanel && tutuPanel.parentElement !== document.body) {
 }
 
 /*
- * 启动时强制隐藏面板，只有点击菜单「兔兔小剧场」才打开。
+ * 启动时强制隐藏面板，只有点击菜单「克制放映室」才打开。
  * 避免主题 / 自定义 CSS 里的 display 覆盖默认隐藏，导致每次启动都弹出。
  */
 if (tutuPanel) {
@@ -5285,7 +5318,7 @@ function exportTutuStyles() {
             [JSON.stringify(data, null, 2)],
             { type: 'application/json;charset=utf-8' }
         ),
-        '兔兔小剧场-样式预设.json'
+        '克制放映室-样式预设.json'
     );
 }
 async function importTutuStyles(file) {
@@ -5299,7 +5332,7 @@ async function importTutuStyles(file) {
         data?.type !== STYLE_PACKAGE_TYPE ||
         !data.styles
     ) {
-        throw new Error('这不是兔兔小剧场样式文件');
+        throw new Error('这不是克制放映室样式文件');
     }
 
     const imported =
@@ -5619,11 +5652,11 @@ function downloadTutuBlob(blob, filename) {
 }
 
 function sanitizeTutuFilename(name) {
-    return String(name || '兔兔小剧场')
+    return String(name || '克制放映室')
         .replace(/[\\/:*?"<>|]/g, '_')
         .replace(/\s+/g, ' ')
         .trim()
-        .slice(0, 80) || '兔兔小剧场';
+        .slice(0, 80) || '克制放映室';
 }
 function exportTutuTextFile(content, characterName) {
     const text = String(content || '').trim();
@@ -5633,7 +5666,7 @@ function exportTutuTextFile(content, characterName) {
         return;
     }
 
-    const title = `兔兔小剧场 - ${characterName}`;
+    const title = `克制放映室 - ${characterName}`;
 
     const output = [
         title,
@@ -5657,40 +5690,6 @@ function exportTutuTextFile(content, characterName) {
 
     toastr.success('纯文本已导出');
 }
-function wrapTutuCanvasText(ctx, text, maxWidth) {
-    const lines = [];
-    const paragraphs = String(text || '').split(/\r?\n/);
-
-    paragraphs.forEach(paragraph => {
-        if (!paragraph) {
-            lines.push('');
-            return;
-        }
-
-        let currentLine = '';
-
-        for (const char of paragraph) {
-            const testLine = currentLine + char;
-
-            if (
-                ctx.measureText(testLine).width > maxWidth &&
-                currentLine
-            ) {
-                lines.push(currentLine);
-                currentLine = char;
-            } else {
-                currentLine = testLine;
-            }
-        }
-
-        if (currentLine) {
-            lines.push(currentLine);
-        }
-    });
-
-    return lines;
-}
-
 function getTutuQuoteStyle(styleName) {
     const styles = {
         minimalist: {
@@ -5766,7 +5765,7 @@ async function exportTutuQuoteImage(
     const showDate = options.showDate !== false;
     const showQuoteMark = options.showQuoteMark !== false;
     const showDecoLine = options.showDecoLine !== false;
-    const titleText = String(options.titleText || '兔兔小剧场').trim();
+    const titleText = String(options.titleText || '克制放映室').trim();
     const subtitleText = String(
         options.subtitleText || `来自：${characterName}`
     ).trim();
@@ -5825,7 +5824,7 @@ async function exportTutuQuoteImage(
 
             const filename =
                 `${sanitizeTutuFilename(
-                    `兔兔小剧场-${characterName}`
+                    `克制放映室-${characterName}`
                 )}.png`;
 
             downloadTutuBlob(blob, filename);
@@ -5839,7 +5838,7 @@ async function exportTutuQuoteImage(
 // 文本换行辅助函数
 function wrapTutuCanvasText(ctx, text, maxWidth, textIndent = 0) {
     const lines = [];
-    const paragraphs = text.split(/\r?\n/);
+    const paragraphs = String(text || '').split(/\r?\n/);
     const indent = textIndent > 0 ? '\u3000'.repeat(textIndent) : '';
 
     paragraphs.forEach(paragraph => {
@@ -5867,17 +5866,6 @@ function wrapTutuCanvasText(ctx, text, maxWidth, textIndent = 0) {
     return lines;
 }
 
-// 统一渲染入口
-function renderQuoteStyle(ctx, params) {
-    const { style } = params;
-    switch (style.renderMode) {
-        case 'social': renderSocialStyle(ctx, params); break;
-        case 'cinematic': renderCinematicStyle(ctx, params); break;
-        case 'ancient': renderAncientStyle(ctx, params); break;
-        case 'cyberpunk': renderCyberpunkStyle(ctx, params); break;
-        default: renderMinimalistStyle(ctx, params);
-    }
-}
 
 // 1. 🌸 极简杂志风（大面积留白，巨大的装饰引号，高级感）
 function renderMinimalistStyle(ctx, params) {
@@ -5955,14 +5943,14 @@ function renderSocialStyle(ctx, params) {
     // 画头像圈 (取名字第一个字)
     const avatarX = cardMargin + 50;
     const avatarR = 35;
-    ctx.fillStyle = '#6557C7'; // 兔兔紫
+    ctx.fillStyle = '#6557C7'; // 主题紫
     ctx.beginPath();
     ctx.arc(avatarX, currentY, avatarR, 0, Math.PI * 2);
     ctx.fill();
     ctx.fillStyle = '#FFFFFF';
     ctx.font = 'bold 30px sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText(titleText.charAt(0) || '兔', avatarX, currentY + 10);
+    ctx.fillText(titleText.charAt(0) || '克', avatarX, currentY + 10);
 
     // ID 和 时间
     ctx.textAlign = 'left';
@@ -6228,7 +6216,7 @@ async function exportTutuCustomCssQuote(content, characterName, options) {
     }
 
     const text = String(content || '').trim();
-    const titleText = String(options.titleText || '兔兔小剧场').trim();
+    const titleText = String(options.titleText || '克制放映室').trim();
     const subtitleText = String(
         options.subtitleText || `来自：${characterName}`
     ).trim();
@@ -6306,7 +6294,7 @@ ${customCss}
     });
 
     const filename = `${sanitizeTutuFilename(
-        `兔兔小剧场-CSS-${characterName}`
+        `克制放映室-CSS-${characterName}`
     )}.html`;
 
     downloadTutuBlob(blob, filename);
@@ -6329,7 +6317,7 @@ function exportTutuHtmlFile(content, characterName) {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>兔兔小剧场 - ${escapeHtml(characterName)}</title>
+<title>克制放映室 - ${escapeHtml(characterName)}</title>
 <style>
 html, body {
     margin: 0;
@@ -6357,7 +6345,7 @@ ${htmlContent}
 
     const filename =
         `${sanitizeTutuFilename(
-            `兔兔小剧场-${characterName}`
+            `克制放映室-${characterName}`
         )}.html`;
 
     downloadTutuBlob(blob, filename);
@@ -6648,7 +6636,7 @@ summary.className = 'tutu-theater-embed-header';
 
 const titleSpan = document.createElement('span');
 titleSpan.className = 'tutu-theater-embed-title';
-titleSpan.textContent = '🐰 兔兔小剧场';
+titleSpan.textContent = '🐱 克制放映室';
 
 const toggleSpan = document.createElement('span');
 toggleSpan.className = 'tutu-theater-embed-toggle';
@@ -6748,7 +6736,7 @@ summary.appendChild(embedActions);
         const iframe = document.createElement('iframe');
 
         iframe.className = 'tutu-theater-embed-iframe';
-        iframe.title = '兔兔小剧场 HTML 内容';
+        iframe.title = '克制放映室 HTML 内容';
 
         /*
          * 不允许 allow-same-origin，
@@ -6891,7 +6879,7 @@ function favoriteTutuContent(
 
     toastr.success(
         `已收藏：「${record.title}」`,
-        '兔兔小剧场'
+        '克制放映室'
     );
 }
 
@@ -7056,7 +7044,7 @@ function openTutuQuoteEditor(content, characterName) {
                                 标题文字
                             </label>
                             <input id="tutu_qe_title" class="text_pole"
-                                type="text" value="兔兔小剧场">
+                                type="text" value="克制放映室">
                         </div>
 
                         <div class="tutu-quote-control-group">
@@ -7243,7 +7231,7 @@ function getTutuQuoteEditorOptions() {
         paddingH: Number($('#tutu_qe_padding_h').val()) || 90,
         paddingV: Number($('#tutu_qe_padding_v').val()) || 90,
         imageWidth: Number($('#tutu_qe_image_width').val()) || 1200,
-        titleText: $('#tutu_qe_title').val() || '兔兔小剧场',
+        titleText: $('#tutu_qe_title').val() || '克制放映室',
         subtitleText: $('#tutu_qe_subtitle').val() || `来自：${tutuQuoteEditorCharacter}`,
         showDate: $('#tutu_qe_show_date').is(':checked'),
         showQuoteMark: $('#tutu_qe_show_quote_mark').is(':checked'),
@@ -7361,7 +7349,7 @@ function openTutuTheaterFullscreen(
     const title = document.createElement('div');
     title.className = 'tutu-fullscreen-title';
     title.textContent =
-        `🐰 兔兔小剧场 · ${finalCharacterName}`;
+        `🐱 克制放映室 · ${finalCharacterName}`;
 
     const actions = document.createElement('div');
     actions.className = 'tutu-fullscreen-actions';
@@ -7428,7 +7416,7 @@ function openTutuTheaterFullscreen(
         const iframe = document.createElement('iframe');
 
         iframe.className = 'tutu-fullscreen-iframe';
-        iframe.title = '兔兔小剧场全屏内容';
+        iframe.title = '克制放映室全屏内容';
 
         iframe.setAttribute(
             'sandbox',
@@ -8037,62 +8025,88 @@ function joinTutuActiveAuxPromptText(type) {
 // ==========================================
 
 /** 内置 HTML 生成要求（设置里可改，留空恢复这一版） */
-const TUTU_DEFAULT_HTML_PROMPT = `【输出格式：交互式 HTML 小剧场】
-把这段小剧场做成一个可直接运行的交互网页。剧情是核心，交互和视觉都为剧情服务。
+const TUTU_DEFAULT_HTML_PROMPT = `【输出格式：高级交互 HTML 小剧场】
+你同时是顶尖的叙事设计师、视觉设计师和前端工程师。把这段小剧场做成一件「可以玩的短篇作品」：像精品独立游戏的过场、获奖互动网页或高端杂志专题，而不是普通网页模板。剧情是核心，视觉和交互都要为情绪和叙事服务。
 
-一、文件结构
-1. 只输出一个完整 HTML 文件：以 <!DOCTYPE html> 开头、</html> 结尾，前后不要有任何说明文字，不要用 \`\`\` 代码围栏。
-2. HTML + CSS + JavaScript 全部内联（<style> 和 <script> 写在文件里），不引用任何外部 JS / CSS 库、CDN 或外部字体，不发起任何网络请求（fetch、XHR、WebSocket 都不要）。
+一、动手前先在心里定好（不要输出）
+1. 一句话的视觉概念：例如「雨夜便利店的冷白荧光」「旧胶片里的夏天」「被翻烂的手账」「深夜的监控屏幕」。整个页面只服务这一个概念。
+2. 承载形式：从情境里挑最有沉浸感的「容器」，不要默认做成文章页。可选：手机界面（聊天、朋友圈、相册、通话、备忘录）、信件/日记/手账、电影分镜与字幕、游戏对话框（视觉小说）、案件档案/调查板、报纸杂志专题、旧电脑终端、监控画面、电台节目、卡牌、地图探索、时间轴等，可以组合。
+3. 色板：1 个主色 + 1 个点缀色 + 2–3 个中性色，背景不用纯白纯黑。字体气质：标题与正文形成对比（如衬线标题 + 无衬线正文，或等宽字体做系统信息）。
+4. 节奏：开场钩子 → 推进 → 情绪高点（最重要的交互放这里）→ 收尾与余韵（隐藏结局或彩蛋）。
+
+二、文件结构
+1. 只输出一个完整 HTML 文件：以 <!DOCTYPE html> 开头、</html> 结尾，前后不要任何说明文字，不要用 \`\`\` 代码围栏。
+2. HTML + CSS + JavaScript 全部内联，不引用外部库、CDN、外部字体，不发起任何网络请求（fetch、XHR、WebSocket 都不要）。
 3. <head> 里写 <meta charset="UTF-8"> 和 <meta name="viewport" content="width=device-width, initial-scale=1">。
-4. 字体只用系统字体栈：-apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif；需要衬线时用 "Songti SC", "SimSun", serif。
-5. 所有 class / id 加统一短前缀（如 tt-），避免和外部样式冲突；CSS 变量写在根容器上统一管理主题色。
+4. 字体只用系统字体栈：无衬线 -apple-system, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif；衬线 "Songti SC", "Noto Serif SC", "SimSun", serif；等宽 ui-monospace, "SF Mono", Consolas, monospace。
+5. 所有 class / id 加统一短前缀（如 tt-）；设计变量（颜色、字号、间距、圆角、阴影、动效时长与缓动）全部写成 CSS 变量放在根容器上。
 
-二、运行环境（必须遵守，否则会显示异常）
-1. 页面运行在一个高度自动撑开的 iframe 里：不要用 100vh / 100dvh / height:100% 撑满屏幕，不要把 html、body 设成固定高度或 overflow:hidden；内容自然向下排布。
+三、运行环境（必须遵守，否则会显示异常）
+1. 页面运行在高度自动撑开的 iframe 里：不要用 100vh / 100dvh / height:100% 撑满屏幕，不要给 html、body 固定高度或 overflow:hidden；内容自然向下排布。「整屏」效果用 min-height: 560px 一类固定值或 aspect-ratio 实现。
 2. 弹窗、抽屉、底部面板用 position:absolute 定位在根容器内，不要用 position:fixed 铺满全屏。
-3. 无法使用 localStorage / sessionStorage / cookie（会报错），状态全部存在 JS 变量里；如果一定要尝试存储，必须用 try/catch 包住。
+3. 无法使用 localStorage / sessionStorage / cookie（会报错），状态全部存在 JS 变量里。
 4. 不要用 alert / confirm / prompt，用自己做的弹层代替。
-5. 脚本放在 </body> 前或用 DOMContentLoaded；整体用 try/catch 包住，出错时内容依然可读。
+5. 脚本放在 </body> 前；整体用 try/catch 包住，出错时剧情文字依然完整可读（内容写在 HTML 里，不要全靠 JS 生成）。
 
-三、手机端与电脑端（同一个文件同时适配，排版要有明显区别）
-1. 移动优先：默认按手机竖屏单列设计，宽度 100%，不出现横向滚动条；@media (min-width: 768px) 切换为电脑布局。
-2. 手机端：单列流式排版；正文 15–16px；按钮和可点击区域至少 44×44px；重要操作放在拇指容易点到的下方；用底部标签栏、底部抽屉、全宽卡片；左右留 12–16px 边距。
-3. 电脑端：内容最大宽度 720–960px 居中；可用双栏 / 侧边栏 / 多列卡片；正文 16–17px；提供 hover 效果、更细的视觉层次和键盘操作。
-4. 同时用 (hover: hover) 与 (pointer: coarse) 区分鼠标和触屏：触屏设备不要依赖 hover 才能看到的内容。
-5. 图片、SVG、表格、代码块都要 max-width:100%，长文本 word-break 防溢出；适配刘海屏 env(safe-area-inset-*)。
+四、视觉设计（决定「高级感」，逐条落实）
+1. 排版：建立明确的字号层级（例如 12 / 14 / 16 / 20 / 28 / 40px），标题字距略收紧，正文行高 1.7–1.9，每行约 18–32 个汉字；善用留白，留白比装饰更高级。
+2. 构图：不要所有内容都是居中卡片。用不对称布局、错位叠放、超大标题、出血图形、分栏、边注、引用大字、编号章节等制造层次和视觉焦点。
+3. 质感：用 CSS / SVG 做出材质——纸张颗粒（SVG feTurbulence 噪点）、胶片划痕与暗角、玻璃拟态（backdrop-filter）、扫描线、墨迹晕染、光斑、柔和多层阴影；选 1–2 种与概念相符的，克制使用。
+4. 图形：图标统一用内联 SVG（线宽一致的线性图标），不要大量 emoji 当图标；插画、头像、场景用 SVG 绘制（剪影、几何、线描），或用 CSS 渐变构成光影氛围。
+5. 光与色：用径向渐变做环境光、用 mix-blend-mode 或滤镜做氛围；避免满屏紫蓝渐变、霓虹堆砌、圆角卡片套娃这类模板化 AI 审美。
+6. 对话呈现：不同角色有各自的颜色、对齐或字体；心声、旁白、系统消息、回忆片段用明显不同的样式（如斜体灰字、等宽字、褪色滤镜）。
+7. 日间 / 夜间模式（必须支持）：
+   - 两套配色都用 CSS 变量定义在根容器上（如 .tt-root 与 .tt-root[data-theme="dark"]），切换时只改 data-theme，所有颜色、背景、边框、阴影都引用变量。
+   - 初始跟随系统 matchMedia('(prefers-color-scheme: dark)') 并监听变化，用户手动切换后不再跟随。
+   - 右上角（手机端放顶部栏）放切换按钮（SVG 太阳 / 月亮 + aria-label），点击即时切换，配 200–300ms 颜色过渡。
+   - 夜间不是简单反色：背景深但不纯黑（如 #14141a 一类），正文用柔和浅色，降低大面积高饱和色，插画适当降亮度；两种模式对比度都足够，风格仍贴合设定（如古风夜间是墨色与烛光暖黄，赛博夜间强化霓虹）。
 
-四、交互（要丰富、有质感，至少 4 种，并贯穿剧情）
+五、动效（像电影一样有节奏）
+1. 开场动画：进入页面时有 1–2 秒的开场（标题逐字浮现、镜头推近、信封展开、屏幕开机、胶片倒数等），可点击跳过。
+2. 滚动叙事：用 IntersectionObserver 让段落、画面在进入视口时依次淡入、上移、模糊变清晰，错开 60–120ms；可做视差层次（背景慢、前景快）。
+3. 关键台词用打字机效果逐字显示（可点击立即显示全文）；重要情绪点配合屏幕轻微震动、闪白、光晕扩散、粒子（花瓣、雪、雨、灰尘、萤火，用 canvas 或 CSS 实现，数量适中）。
+4. 缓动统一用 cubic-bezier(.22,.61,.36,1) 或 cubic-bezier(.65,0,.35,1) 这类自然曲线，只动 transform / opacity / filter；时长 150–600ms，开场与转场可更长。
+5. 支持 prefers-reduced-motion：用户偏好减少动画时关闭位移、粒子和震动，只保留淡入。
+
+六、交互（至少 5 种，贯穿剧情而不是堆在末尾）
 手机端常见交互必须完善支持：
-- 点击 / 轻触：按钮、卡片翻转、展开收起、切换选项
-- 长按（约 500ms）：弹出隐藏内容、心声、菜单，附带轻微缩放反馈
-- 左右滑动：翻页、切换角色视角、滑动卡片；上下滑动：展开底部抽屉
-- 拖拽：拖动物品、拼图、排序、拉开遮挡
-- 双击：点赞 / 收藏 / 彩蛋
-- 涂抹 / 刮开、滑块解锁、进度条推进剧情
-电脑端：hover 预览、点击、拖拽、滚轮、键盘（← → 翻页，Esc 关闭弹层，Enter 确认）。
+- 点击 / 轻触：推进对话、翻转卡片、展开回忆、选择选项
+- 长按（约 500ms，带进度环或缩放反馈）：听见心声、查看隐藏消息、撕开封条
+- 左右滑动：翻页、切换角色视角、滑过照片；上下滑动：拉出底部抽屉
+- 拖拽：拼合碎纸、移动物品、把信塞进信封、拉开窗帘或遮挡
+- 双击：点赞、收藏、触发彩蛋
+- 涂抹刮开（canvas）、滑块解锁、按住充能、摇晃/倾斜（DeviceOrientation 可选，必须有点击替代）
+电脑端：hover 预览与光标跟随光效、点击、拖拽、滚轮、键盘（← → 翻页，空格推进，Esc 关闭弹层，Enter 确认）。
+叙事型交互（按情境挑 2–3 个做深）：
+- 分支选择影响后续文字和结局，结尾显示「你的选择」回顾，提供「重新开始」
+- 好感度 / 心情 / 理智等数值条，随选择动画变化
+- 收集线索或回忆碎片，集齐解锁隐藏结局或番外一句话
+- 模拟手机：消息逐条弹出（带「对方正在输入…」）、可点开的照片、未接来电、撤回的消息
+- 视角切换：同一事件分别看两个人的内心
 实现要求：
-- 统一用 Pointer Events（pointerdown / pointermove / pointerup）同时兼容鼠标和触摸；需要滑动的区域设置 touch-action，避免和页面滚动冲突；按钮加 user-select:none 和 -webkit-tap-highlight-color:transparent。
-- 每次操作都有即时视觉反馈（按下态、过渡动画、状态变化），动画用 transform / opacity，时长 150–400ms。
-- 第一次出现的手势给出简短提示（如「长按查看」「左滑翻页」），不要让用户猜。
-- 推荐剧情交互：分支选项影响结局、好感度 / 心情数值、可解锁的隐藏对话或回忆、逐字显示的对话（可点击跳过）、手机界面模拟（聊天、朋友圈、相册、备忘录、来电）、日记翻页、信件拆封等，按情境挑合适的。
-- 支持 prefers-reduced-motion：用户偏好减少动画时关闭大幅动画。
-- 可点击元素用 <button> 或带 role / tabindex / aria-label，保证键盘可操作；文字与背景对比度足够。
+- 统一用 Pointer Events（pointerdown / pointermove / pointerup）兼容鼠标和触摸；需要手势的区域设置合适的 touch-action，避免和页面滚动冲突；可点元素加 user-select:none 和 -webkit-tap-highlight-color:transparent。
+- 每次操作都有即时反馈：按下态缩放、涟漪、状态过渡；可用 navigator.vibrate(10) 做轻触震动（先判断是否存在）。
+- 第一次出现的手势给出优雅的提示（呼吸动画的小手势图标 + 一句话），不要让用户猜。
+- 可点击元素用 <button> 或带 role / tabindex / aria-label，键盘可操作，focus-visible 有清晰样式。
 
-五、视觉风格
-1. 风格、配色、字体气质、装饰元素必须和角色设定、世界观、情境一致（古风用宣纸 / 墨色 / 印章；赛博用霓虹 / 网格；校园用便签 / 手写感等），不要套用千篇一律的模板。
-2. 层次清晰：标题、正文、旁白、对话、系统提示样式区分明显；对话可做成气泡或带名字的台词块，不同角色颜色区分。
-3. 适度使用渐变、阴影、圆角、纹理（CSS 实现），整体精致但不花哨，正文可读性优先。
+七、手机端与电脑端（同一文件，排版要有明显区别）
+1. 移动优先：默认手机竖屏单列，宽度 100%，不出现横向滚动；@media (min-width: 768px) 切换为电脑布局。
+2. 手机端：正文 15–16px；可点区域至少 44×44px；主要操作放在拇指区（下方）；底部标签栏 / 抽屉 / 全宽卡片；左右边距 16px；适配刘海屏 env(safe-area-inset-*)。
+3. 电脑端：内容最大宽度 720–1040px 居中；用双栏、侧边注释、多列画廊、悬浮细节让大屏更丰富，而不是把手机版拉宽。
+4. 用 (hover: hover) 与 (pointer: coarse) 区分鼠标和触屏：触屏不要依赖 hover 才能看到的内容。
+5. 图片、SVG、canvas、表格都要 max-width:100%；长文本 word-break 防溢出；canvas 按 devicePixelRatio 绘制保证清晰。
 
-六、图片与素材
-1. 优先用 CSS、内联 SVG、emoji、Unicode 符号绘制图标、头像、插画和装饰，不依赖外部图片。
-2. 确实需要外部图片时：只能用你确定真实存在、可公开合法使用（CC0 / 免版权，或用户提供）的链接，内容只能是风景、物品、建筑、纹理、抽象图案或插画；必须写 alt，并加 onerror 隐藏或替换为 CSS 占位。
-3. 禁止使用真人照片、明星、网红或任何可识别的真实人物形象，禁止编造不确定的图片链接；人物形象一律用插画风 SVG、剪影或文字头像代替。
-4. 禁止嵌入音视频外链、iframe、表单提交到外部地址。
+八、图片与素材
+1. 优先用 CSS、内联 SVG、canvas 绘制一切视觉元素。
+2. 确实需要外部图片时：只用你确定真实存在、可公开合法使用（CC0 / 免版权，或用户提供）的链接，内容只能是风景、物品、建筑、纹理、抽象图案；必须写 alt，并加 onerror 隐藏或替换为 CSS 占位。
+3. 禁止使用真人照片、明星、网红或任何可识别的真实人物形象，禁止编造不确定的图片链接；人物一律用插画风 SVG、剪影或文字头像。
+4. 禁止嵌入音视频外链、iframe、表单提交到外部地址。需要声音时可用 Web Audio API 合成极短的提示音，默认静音，由用户点击开启。
 
-七、内容与篇幅
-1. 剧情内容完整、有起承转合，文字量不少于纯文本版本；交互是增强体验，不能让剧情只剩按钮。
-2. 不需要交互也能读完主线；隐藏内容是加分项。
-3. 代码精简：避免重复样式和冗余脚本，总长度控制在合理范围，确保在输出上限内写完并闭合所有标签。`;
+九、内容与完成度
+1. 文字是作品的灵魂：剧情完整、有起承转合，文字量不少于纯文本版本；人物语气贴合设定，细节具体可感。
+2. 不交互也能读完主线；交互和隐藏内容是加分项，不能让剧情只剩按钮。
+3. 代码精简：复用样式类和函数，避免重复和冗余；优先保证剧情和核心交互完整，装饰效果其次。确保在输出上限内写完并闭合所有标签。
+4. 输出前自检：没有外部请求、没有 100vh 和全屏 fixed、日夜间两套颜色都正确、手机和电脑都能操作、所有标签已闭合。`;
 
 /** 纯文本格式要求：配合排版美化自动识别 */
 function buildTutuTextFormatRules() {
@@ -8414,17 +8428,17 @@ async function runTutuGeneration({
 
     if (isContinue) {
         // 续写时保留已有内容，只更新状态
-        $('#tutu_result_status').text('🐰 兔兔正在接着往下写……');
+        $('#tutu_result_status').text('🐱 克制正在接着往下写……');
     } else {
         $('#tutu_result_status').text(
             isAutomatic
-                ? '🐰 收到最新剧情，兔兔正在生成番外……'
-                : '🐰 兔兔正在疯狂码字中……'
+                ? '🐱 收到最新剧情，克制正在生成番外……'
+                : '🐱 克制脑洞中……'
         );
 
         $('#tutu_result_preview').html(`
             <div class="tutu-result-placeholder">
-                🐰 正在生成小剧场……
+                🐱 正在生成小剧场……
             </div>
         `);
 
@@ -8539,21 +8553,30 @@ $('#tutu_result_status').text(
     (outputMode === 'embed' ? '，已嵌入最新 AI 回复楼层。' : '。')
 );
 
-if (isContinue) {
-    toastr.success('已接着上文续写完成，可再次续写', '兔兔小剧场');
+// HTML 没写到 </html> 多半是被回复长度截断了，提示续写
+const htmlTruncated =
+    isProbablyHtml(result) &&
+    /<!doctype html|<html[\s>]/i.test(result) &&
+    !/<\/html\s*>\s*$/i.test(String(result).trim());
+
+if (htmlTruncated) {
+    $('#tutu_result_status').text('HTML 似乎没写完（缺少 </html>），可点「续写」补完，或调大回复长度。');
+    toastr.warning('HTML 没写完，可能被回复长度截断：点「续写」补完，或在酒馆 / 副 API 调大回复长度（建议 8000 tokens 以上）', '克制放映室');
+} else if (isContinue) {
+    toastr.success('已接着上文续写完成，可再次续写', '克制放映室');
 } else if (outputMode === 'embed') {
     toastr.success(
         isAutomatic
             ? '已根据最新 AI 回复生成并嵌入小剧场'
             : '小剧场生成完成，并已嵌入聊天楼层',
-        '兔兔小剧场'
+        '克制放映室'
     );
 } else {
     toastr.success(
         isAutomatic
             ? '已根据最新 AI 回复生成小剧场'
             : '小剧场生成完成',
-        '兔兔小剧场'
+        '克制放映室'
     );
 }
 } catch (error) {
@@ -8590,7 +8613,7 @@ if (isContinue) {
     if (isContinue) {
         showTutuResult(continueFrom);
         $('#tutu_result_status').text(`❌ 续写失败：${errorMessage}`);
-        toastr.error(errorMessage, '兔兔小剧场续写失败');
+        toastr.error(errorMessage, '克制放映室续写失败');
         return;
     }
 
@@ -8623,8 +8646,8 @@ if (isContinue) {
     toastr.error(
         errorMessage,
         isAutomatic
-            ? '兔兔小剧场自动生成失败'
-            : '兔兔小剧场生成失败'
+            ? '克制放映室自动生成失败'
+            : '克制放映室生成失败'
     );
 
 } finally {
@@ -8696,7 +8719,7 @@ function cancelTutuGeneration() {
     try {
         token.controller?.abort();
     } catch (error) {
-        console.warn('[兔兔小剧场] 中断副 API 请求失败：', error);
+        console.warn('[克制放映室] 中断副 API 请求失败：', error);
     }
 
     try {
@@ -8708,7 +8731,7 @@ function cancelTutuGeneration() {
             $('#mes_stop:visible').trigger('click');
         }
     } catch (error) {
-        console.warn('[兔兔小剧场] 中断主 API 生成失败：', error);
+        console.warn('[克制放映室] 中断主 API 生成失败：', error);
     }
 
     token.onCancel?.();
@@ -8717,7 +8740,7 @@ function cancelTutuGeneration() {
     tutuCurrentGeneration = null;
     setTutuGenerateButtonState(false);
 
-    toastr.info('已取消生成', '兔兔小剧场');
+    toastr.info('已取消生成', '克制放映室');
 }
 function getTutuLatestMessageKey() {
     const context =
@@ -8892,7 +8915,7 @@ function initTutuAutoGenerationListener() {
         !event_types?.MESSAGE_RECEIVED
     ) {
         console.warn(
-            '兔兔小剧场：没有找到 MESSAGE_RECEIVED 事件'
+            '克制放映室：没有找到 MESSAGE_RECEIVED 事件'
         );
 
         return;
@@ -8929,7 +8952,7 @@ function initTutuAutoGenerationListener() {
 
                 if (!replyInfo) {
                     console.log(
-                        '[兔兔小剧场] 当前消息不是用户触发的 AI 回复，不自动生成'
+                        '[克制放映室] 当前消息不是用户触发的 AI 回复，不自动生成'
                     );
 
                     return;
@@ -8946,7 +8969,7 @@ const {
  */
 if (latestIndex <= 0) {
     console.log(
-        '[兔兔小剧场] 第 0 层是角色开场白，跳过自动生成'
+        '[克制放映室] 第 0 层是角色开场白，跳过自动生成'
     );
 
     return;
@@ -8969,7 +8992,7 @@ if (latestIndex <= 0) {
                     )
                 ) {
                     console.log(
-                        '[兔兔小剧场] 当前 AI 楼层已经存在小剧场，跳过重复生成'
+                        '[克制放映室] 当前 AI 楼层已经存在小剧场，跳过重复生成'
                     );
 
                     return;
@@ -9000,7 +9023,7 @@ if (latestIndex <= 0) {
 
                 if (!scenario) {
                     console.warn(
-                        '兔兔小剧场：当前自动生成范围内没有可用剧本'
+                        '克制放映室：当前自动生成范围内没有可用剧本'
                     );
 
                     return;
@@ -9013,7 +9036,7 @@ if (latestIndex <= 0) {
 
             } catch (error) {
                 console.error(
-                    '兔兔小剧场自动生成失败：',
+                    '克制放映室自动生成失败：',
                     error
                 );
             }
@@ -9112,7 +9135,7 @@ function restoreAllTutuTheaterEmbeds() {
             !storedTheater.content
         ) {
             console.warn(
-                '[兔兔小剧场] 找不到对应楼层的小剧场内容：',
+                '[克制放映室] 找不到对应楼层的小剧场内容：',
                 index
             );
 
@@ -9224,7 +9247,7 @@ function attachTutuCaptureActions(element) {
 
     const label = document.createElement('span');
     label.className = 'tutu-capture-label';
-    label.textContent = '🐰 小剧场';
+    label.textContent = '🐱 小剧场';
 
     const buttonsContainer = document.createElement('span');
     buttonsContainer.className = 'tutu-capture-buttons';
@@ -9569,6 +9592,15 @@ if (!response.ok) {
     }
 }
 
+/** 最大输出长度：空 / 0 / 非法值返回 0（表示不发送），否则取整并限制在 1–200000 */
+function normalizeTutuMaxTokens(value) {
+    const number = Math.floor(Number(value));
+
+    if (!Number.isFinite(number) || number <= 0) return 0;
+
+    return Math.min(number, 200000);
+}
+
 async function generateBySecondaryApi(prompt, signal) {
     const endpointInput =
         $('#tutu_secondary_endpoint').val().trim();
@@ -9599,19 +9631,28 @@ const model = String($('#tutu_secondary_model').val() || '').trim();
         headers.Authorization = `Bearer ${apiKey}`;
     }
 
+    const requestBody = {
+        model,
+        messages: [
+            {
+                role: 'user',
+                content: prompt,
+            }
+        ],
+        temperature: 0.8,
+    };
+
+    // 留空不发送，交给接口默认值
+    const maxTokens = normalizeTutuMaxTokens(tutuSettings.secondaryMaxTokens);
+
+    if (maxTokens) {
+        requestBody.max_tokens = maxTokens;
+    }
+
     const response = await fetch(endpoint, {
         method: 'POST',
         headers,
-        body: JSON.stringify({
-            model,
-            messages: [
-                {
-                    role: 'user',
-                    content: prompt,
-                }
-            ],
-            temperature: 0.8,
-        }),
+        body: JSON.stringify(requestBody),
         signal,
     });
 
@@ -9663,6 +9704,16 @@ if (!response.ok) {
         data?.content ??
         data?.text;
 
+    // 被最大输出长度截断：提示调大，内容照常返回
+    if (data?.choices?.[0]?.finish_reason === 'length') {
+        toastr.warning(
+            maxTokens
+                ? `输出达到最大长度 ${maxTokens} 被截断，可点「续写」或在设置里调大最大输出长度`
+                : '输出被接口默认长度截断，可点「续写」或在设置里填写最大输出长度',
+            '克制放映室'
+        );
+    }
+
     if (result === undefined || result === null) {
         throw new Error(
             '副 API 返回的数据中没有找到文本内容：\n' +
@@ -9702,6 +9753,9 @@ function saveTutuSettings() {
 
         model:
             String($('#tutu_secondary_model').val() || '').trim(),
+
+        secondaryMaxTokens:
+            normalizeTutuMaxTokens($('#tutu_secondary_max_tokens').val()),
 
         autoGenerateEnabled:
             $('#tutu_auto_generate_enabled').is(':checked'),
@@ -10149,6 +10203,9 @@ function loadTutuSettingsToUI() {
 
     setTutuSecondaryModelValue(tutuSettings.model || '');
 
+    const maxTokens = normalizeTutuMaxTokens(tutuSettings.secondaryMaxTokens);
+    $('#tutu_secondary_max_tokens').val(maxTokens || '');
+
     $('#tutu_auto_generate_enabled')
         .prop(
             'checked',
@@ -10292,6 +10349,7 @@ if (!model) {
         endpoint,
         apiKey,
         model,
+        maxTokens: normalizeTutuMaxTokens($('#tutu_secondary_max_tokens').val()),
     };
 
     const oldIndex = tutuApiPresets.findIndex(item => item.name === name);
@@ -10344,6 +10402,15 @@ if (
 }
 
 $modelSelect.val(presetModel);
+
+    // 旧预设没有这个字段时保留当前值
+    if (Object.prototype.hasOwnProperty.call(preset, 'maxTokens')) {
+        const presetMaxTokens = normalizeTutuMaxTokens(preset.maxTokens);
+
+        $('#tutu_secondary_max_tokens').val(presetMaxTokens || '');
+        tutuSettings.secondaryMaxTokens = presetMaxTokens;
+        persistTutuSettings();
+    }
 
     $('#tutu_api_preset_name').val(preset.name || '');
 
@@ -10897,12 +10964,12 @@ function exportTutuJsonPackage() {
 
     const filename =
         sanitizeTutuFilename(
-            `兔兔小剧场${suffix}`
+            `克制放映室${suffix}`
         ) + '.json';
 
     downloadTutuBlob(blob, filename);
 
-    toastr.success('兔兔小剧场 JSON 导出成功');
+    toastr.success('克制放映室 JSON 导出成功');
 }
 
 function exportTutuSingleScenario(index) {
@@ -10938,10 +11005,10 @@ function exportTutuSingleScenario(index) {
     }
 
     /*
-     * 使用和批量导出完全相同的兔兔小剧场 JSON 格式。
+     * 使用和批量导出完全相同的克制放映室 JSON 格式。
      *
      * 这样导出的单个剧本可以直接使用：
-     * “导入兔兔 JSON”
+     * “导入克制 JSON”
      * 再导入到剧本库。
      */
     const packageData = {
@@ -10976,14 +11043,14 @@ function exportTutuSingleScenario(index) {
 
     const filename =
         sanitizeTutuFilename(
-            `兔兔小剧场-${category}-${name}`
+            `克制放映室-${category}-${name}`
         ) + '.json';
 
     downloadTutuBlob(blob, filename);
 
     toastr.success(
         `剧本「${name}」导出成功`,
-        '兔兔小剧场'
+        '克制放映室'
     );
 }
 
@@ -11070,7 +11137,7 @@ function exportTutuSillyTavernPreset() {
     }];
 
     const preset = {
-        name: '兔兔小剧场预设',
+        name: '克制放映室预设',
 
         /*
          * 当前版本通常读取 prompts
@@ -11102,7 +11169,7 @@ function exportTutuSillyTavernPreset() {
 
     const filename =
         sanitizeTutuFilename(
-            '兔兔小剧场-SillyTavern对话补全预设'
+            '克制放映室-SillyTavern对话补全预设'
         ) + '.json';
 
     downloadTutuBlob(blob, filename);
@@ -11128,13 +11195,13 @@ function exportTutuSillyTavernWorldbook() {
      * 一个小剧场剧本对应一个世界书条目。
      */
     const worldbook = {
-        name: '兔兔小剧场世界书',
+        name: '克制放映室世界书',
 
         entries: packageData.scenarios.map((item, index) => ({
             uid: index,
 
             key: [
-                '兔兔小剧场',
+                '克制放映室',
                 item.category,
                 item.name,
             ],
@@ -11165,7 +11232,7 @@ function exportTutuSillyTavernWorldbook() {
             order: index,
 
             /*
-             * 保存兔兔小剧场自己的分类信息。
+             * 保存克制放映室自己的分类信息。
              * 不认识 extensions 的程序也不会影响正常使用。
              */
             extensions: {
@@ -11187,7 +11254,7 @@ function exportTutuSillyTavernWorldbook() {
 
     const filename =
         sanitizeTutuFilename(
-            '兔兔小剧场-SillyTavern世界书'
+            '克制放映室-SillyTavern世界书'
         ) + '.json';
 
     downloadTutuBlob(blob, filename);
@@ -11318,7 +11385,7 @@ function convertImportedDataToTutuScenarios(data) {
         !Array.isArray(data.scenarios)
     ) {
         throw new Error(
-            '这不是兔兔小剧场导出的 JSON 文件'
+            '这不是克制放映室导出的 JSON 文件'
         );
     }
 
@@ -11719,7 +11786,7 @@ try {
             throw new Error('世界书内容为空');
         }
 
-        console.log('读取到的世界书数据：', data);
+
 
         // SillyTavern 世界书的 entries 通常是对象：
         // {
@@ -11774,7 +11841,7 @@ try {
             throw new Error('对话补全预设内容为空');
         }
 
-        console.log('读取到的对话补全预设数据：', data);
+
 
         const pmArray = data.prompts || data.prompt_manager || [];
 
@@ -12622,7 +12689,7 @@ $(document).on(
 );
 
 
-// 选择兔兔 JSON 文件
+// 选择克制 JSON 文件
 $(document).on(
     'change',
     '#tutu_import_library_file',
@@ -12638,7 +12705,7 @@ $(document).on(
             await importTutuLibraryFile(file);
         } catch (error) {
             console.error(
-                '导入兔兔小剧场失败：',
+                '导入克制放映室失败：',
                 error
             );
 
@@ -14027,6 +14094,18 @@ $(document).on('change', '#tutu_api_provider', function() {
     updateSecondaryApiVisibility();
 });
 
+// 最大输出长度：改动即保存，快捷按钮直接填入
+$(document).on('input change', '#tutu_secondary_max_tokens', function () {
+    tutuSettings.secondaryMaxTokens = normalizeTutuMaxTokens($(this).val());
+    persistTutuSettings();
+});
+
+$(document).on('click', '.tutu-max-tokens-preset', function () {
+    const value = normalizeTutuMaxTokens($(this).attr('data-value'));
+
+    $('#tutu_secondary_max_tokens').val(value || '').trigger('change');
+});
+
 // API 选择 / 地址 / 密钥 / 模型：改动即自动保存，下次打开无需重新设置
 $(document).on(
     'input change',
@@ -14614,7 +14693,7 @@ $(document).on('click', '.tutu-load-script-btn', function() {
     switchTutuTab('tutu_tab_generate');
 
     // 提示用户
-    toastr.info(`已载入：${item.name}`, '兔兔小剧场');
+    toastr.info(`已载入：${item.name}`, '克制放映室');
 });
 
 // 编辑剧本

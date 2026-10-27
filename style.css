@@ -667,7 +667,7 @@
     overflow-y: auto !important;
 }
 /* =========================================================
-   兔兔小剧场：新版整体排版修正
+   克制放映室：新版整体排版修正
    直接放在 style.css 最底部
    ========================================================= */
 
@@ -1427,7 +1427,7 @@
     background: rgba(100, 180, 255, 0.16);
 }
 /* =========================================================
-   兔兔小剧场：紧凑图标排版
+   克制放映室：紧凑图标排版
    ========================================================= */
 
 /* ---- 通用图标按钮 (极简圆形) ---- */
@@ -1546,6 +1546,32 @@
     align-items: center;
     gap: 5px;
     flex-shrink: 0;
+}
+
+/* 副 API 最大输出长度 */
+.tutu-max-tokens-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+.tutu-max-tokens-row input {
+    flex: 1 1 160px;
+    min-width: 0;
+    margin: 0;
+}
+
+.tutu-max-tokens-presets {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.tutu-max-tokens-preset {
+    min-width: 40px;
+    padding: 3px 8px;
+    font-size: 0.85em;
 }
 
 /* 生成格式：纯文本 / HTML */
@@ -3174,7 +3200,7 @@ details.tutu-captured-element > .tutu-capture-actions-bar {
     line-height: 1.4;
 }
 /* =========================================================
-   兔兔小剧场：界面外观管理器
+   克制放映室：界面外观管理器
    ========================================================= */
 
 .tutu-appearance-manager {
