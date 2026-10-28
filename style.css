@@ -2289,6 +2289,125 @@
     margin: 3px 0 0;
 }
 
+/* 导出范围：全部 / 选段 */
+.tutu-export-range {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 2px 4px 4px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.15));
+}
+
+.tutu-export-range-switch {
+    display: flex;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.2));
+    border-radius: 7px;
+    overflow: hidden;
+}
+
+.tutu-export-range-btn {
+    flex: 1 1 0;
+    min-height: 30px;
+    margin: 0;
+    padding: 3px 8px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 0.85em;
+    opacity: 0.7;
+    cursor: pointer;
+}
+
+.tutu-export-range-btn + .tutu-export-range-btn {
+    border-left: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.2));
+}
+
+.tutu-export-range-btn[aria-checked="true"] {
+    opacity: 1;
+    font-weight: 600;
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor, #c96f4a) 20%, transparent);
+}
+
+.tutu-export-range-btn:focus-visible,
+.tutu-export-range-tool:focus-visible {
+    outline: 2px solid var(--SmartThemeQuoteColor, #c96f4a);
+    outline-offset: -2px;
+}
+
+.tutu-export-range-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.tutu-export-range-panel[hidden] {
+    display: none;
+}
+
+.tutu-export-range-tools {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.78em;
+}
+
+.tutu-export-range-count {
+    flex: 1 1 auto;
+    opacity: 0.65;
+}
+
+.tutu-export-range-tool {
+    padding: 2px 8px;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.2));
+    border-radius: 5px;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+}
+
+.tutu-export-range-list {
+    display: flex;
+    flex-direction: column;
+    max-height: 180px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.15));
+    border-radius: 6px;
+}
+
+.tutu-export-range-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 4px 6px;
+    font-size: 0.8em;
+    line-height: 1.45;
+    cursor: pointer;
+}
+
+.tutu-export-range-item + .tutu-export-range-item {
+    border-top: 1px solid rgba(127, 127, 127, 0.15);
+}
+
+.tutu-export-range-item input {
+    flex: none;
+    margin: 2px 0 0;
+}
+
+.tutu-export-range-item span {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-break: break-word;
+}
+
+.tutu-export-range-item:has(input:not(:checked)) span {
+    opacity: 0.5;
+}
+
 .tutu-export-mask-line {
     display: flex;
     align-items: center;
@@ -2310,79 +2429,61 @@
     border-color: var(--SmartThemeQuoteColor, #c96f4a);
 }
 
-/* ---- 手机：浮动面板改成底部弹出 ---- */
-.tutu-name-mask-popover[data-placement="sheet"] {
-    right: 0;
-    width: 100vw;
-    max-width: none;
-    padding: 0;
-    animation-name: tutu-sheet-in;
-}
-
-.tutu-name-mask-popover[data-placement="sheet"] > .tutu-dialogue-editor {
-    border-bottom: 0;
-    border-radius: 14px 14px 0 0;
-    padding-bottom: calc(12px + env(safe-area-inset-bottom, 0px));
-    /* 第二层阴影把后面的页面（含下层面板）压暗，分清层次 */
-    box-shadow: 0 -8px 30px rgba(0, 0, 0, 0.45), 0 0 0 100vmax rgba(0, 0, 0, 0.4);
-}
-
-.tutu-name-mask-popover[data-placement="sheet"] > .tutu-dialogue-editor {
-    backdrop-filter: blur(14px);
-    -webkit-backdrop-filter: blur(14px);
-}
-
-/* 从导出菜单打开屏蔽设置时，先把导出菜单藏起来，免得两层叠在一起透出文字 */
-body:has(#tutu_name_mask_editor[data-placement="sheet"]) #tutu_export_dialog[data-placement="sheet"] {
-    visibility: hidden;
-}
-
-/* 顶部小横条，提示这是弹出面板 */
-.tutu-name-mask-popover[data-placement="sheet"] > .tutu-dialogue-editor::before {
-    content: '';
-    flex: none;
-    align-self: center;
-    width: 36px;
-    height: 4px;
-    margin: 6px 0 2px;
-    border-radius: 2px;
-    background: rgba(127, 127, 127, 0.45);
-}
-
-@keyframes tutu-sheet-in {
-    from { transform: translateY(24px); opacity: 0; }
-    to { transform: none; opacity: 1; }
-}
-
-.tutu-name-mask-popover[data-placement="sheet"] .tutu-export-format {
-    min-height: 48px;
-    padding: 10px 10px;
-    align-items: center;
-}
-
-.tutu-name-mask-popover[data-placement="sheet"] .tutu-export-format > i {
-    margin-top: 0;
-    font-size: 1.1em;
-}
-
-.tutu-name-mask-popover[data-placement="sheet"] .tutu-export-option {
-    min-height: 40px;
-    align-items: center;
-}
-
-.tutu-name-mask-popover[data-placement="sheet"] .tutu-export-option input {
-    width: 18px;
-    height: 18px;
-    margin-top: 0;
-}
-
-.tutu-name-mask-popover[data-placement="sheet"] .tutu-export-mask-edit {
-    width: 44px;
-    height: 44px;
-}
-
-/* 手机：屏蔽设置不再底部弹出，改为贴在按钮下方的小浮层 */
+/* 手机：屏蔽设置、导出菜单都贴在按钮下方显示成小浮层 */
 @media (max-width: 600px), (pointer: coarse) and (max-height: 500px) {
+    #tutu_export_dialog {
+        width: min(280px, calc(100vw - 16px));
+    }
+
+    #tutu_export_dialog .tutu-export-format {
+        align-items: center;
+        min-height: 40px;
+        padding: 6px 8px;
+    }
+
+    #tutu_export_dialog .tutu-export-format > i {
+        margin-top: 0;
+    }
+
+    #tutu_export_dialog .tutu-export-format-text small {
+        display: none;
+    }
+
+    #tutu_export_dialog .tutu-export-option {
+        align-items: center;
+        min-height: 36px;
+        padding: 3px 4px;
+    }
+
+    #tutu_export_dialog .tutu-export-option input {
+        width: 18px;
+        height: 18px;
+        margin-top: 0;
+    }
+
+    #tutu_export_dialog .tutu-export-mask-edit {
+        width: 36px;
+        height: 36px;
+    }
+
+    #tutu_export_dialog .tutu-export-range-btn {
+        min-height: 34px;
+    }
+
+    #tutu_export_dialog .tutu-export-range-list {
+        max-height: 140px;
+    }
+
+    #tutu_export_dialog .tutu-export-range-item {
+        padding: 6px;
+    }
+
+    #tutu_export_dialog .tutu-export-range-item input {
+        width: 18px;
+        height: 18px;
+        margin-top: 0;
+    }
+
     #tutu_name_mask_editor {
         width: min(320px, calc(100vw - 16px));
         max-height: min(60vh, calc(100vh - 16px));

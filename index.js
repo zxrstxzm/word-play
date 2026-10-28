@@ -9116,17 +9116,11 @@ function getTutuNameMaskAnchor() {
 }
 
 function positionTutuNameMaskEditor() {
-    // 屏蔽设置在手机上也贴着按钮显示成小浮层，不用底部弹出
-    positionTutuPopover(document.getElementById('tutu_name_mask_editor'), getTutuNameMaskAnchor(), { sheet: false });
+    positionTutuPopover(document.getElementById('tutu_name_mask_editor'), getTutuNameMaskAnchor());
 }
 
-/** 手机等窄屏：浮动面板改为底部弹出 */
-function isTutuSheetLayout() {
-    return window.matchMedia('(max-width: 600px), (pointer: coarse) and (max-height: 500px)').matches;
-}
-
-/** 把浮动面板放在按钮下方；下方放不下就放上方，左右不超出屏幕 */
-function positionTutuPopover(modal, anchor, { sheet = true } = {}) {
+/** 把浮动面板放在按钮下方；下方放不下就放上方，左右不超出屏幕（手机上同样贴着按钮） */
+function positionTutuPopover(modal, anchor) {
     if (!modal) return;
 
     const gap = 6;
@@ -9135,22 +9129,6 @@ function positionTutuPopover(modal, anchor, { sheet = true } = {}) {
     const vh = window.innerHeight;
 
     modal.style.maxHeight = '';
-
-    // 手机：改成从底部弹出的面板，手指好点，键盘弹出时跟着可视区域上移
-    if (sheet && isTutuSheetLayout()) {
-        const view = window.visualViewport;
-        const viewHeight = view ? view.height : vh;
-        const viewBottom = view ? view.offsetTop + view.height : vh;
-
-        modal.dataset.placement = 'sheet';
-        modal.style.left = '0px';
-        modal.style.top = 'auto';
-        modal.style.bottom = `${Math.max(0, vh - viewBottom)}px`;
-        modal.style.maxHeight = `${Math.round(Math.max(200, viewHeight * 0.85))}px`;
-        modal.style.removeProperty('--tutu-mask-arrow-x');
-        return;
-    }
-
     modal.style.bottom = 'auto';
 
     // 找不到按钮时居中
@@ -9558,14 +9536,64 @@ function getTutuExportOptions() {
 
 // 记下最近点过的按钮：导出菜单没传按钮时就浮在它下面
 let tutuLastPressedButton = null;
+// 点按钮那一刻页面上选中的文字：打开导出菜单时自动勾上对应段落
+let tutuLastSelectionText = '';
 
 document.addEventListener('pointerdown', event => {
     const button = event.target?.closest?.('button, .menu_button, [role="button"], .fa-solid, .fa-regular');
 
     if (button && !button.closest('#tutu_export_dialog, #tutu_name_mask_editor')) {
         tutuLastPressedButton = button.closest('button, .menu_button, [role="button"]') || button;
+        tutuLastSelectionText = String(window.getSelection?.() || '').trim();
     }
 }, true);
+
+/** 导出「选段」用的段落列表：只列非空行，行号对应原文 */
+function getTutuExportLines(text) {
+    return normalizeTutuPlainSource(text)
+        .split('\n')
+        .map((line, index) => ({ index, line }))
+        .filter(item => item.line.trim());
+}
+
+/** 页面上选中的文字落在哪些段落里 */
+function matchTutuSelectionLines(lines, selection) {
+    const parts = String(selection || '').split('\n').map(item => item.trim()).filter(Boolean);
+
+    if (!parts.length) return new Set();
+
+    return new Set(lines
+        .filter(({ line }) => parts.some(part => line.includes(part) || (part.length >= 4 && part.includes(line.trim()))))
+        .map(item => item.index));
+}
+
+/** 按「全部 / 选段」取要导出的文字；选段时行号修正跟着挪过去。没选段落返回 null */
+function getTutuExportSegment(modal, text) {
+    if (modal.querySelector('.tutu-export-range-btn[data-range="part"]')?.getAttribute('aria-checked') !== 'true') {
+        return { text, overrides: null, partial: false };
+    }
+
+    const lines = normalizeTutuPlainSource(text).split('\n');
+    const picked = [...modal.querySelectorAll('.tutu-export-range-item input:checked')]
+        .map(input => Number(input.dataset.line))
+        .filter(index => Number.isInteger(index) && lines[index] !== undefined)
+        .sort((a, b) => a - b);
+
+    if (!picked.length) return null;
+
+    const allOverrides = getTutuDialogueOverrides(text);
+    const overrides = {};
+    const out = [];
+
+    picked.forEach((index, i) => {
+        // 原文里不相邻的段落之间留一个空行，分段和原来一样
+        if (i > 0 && index > picked[i - 1] + 1) out.push('');
+        if (allOverrides[index]) overrides[out.length] = allOverrides[index];
+        out.push(lines[index]);
+    });
+
+    return { text: out.join('\n'), overrides, partial: picked.length < getTutuExportLines(text).length };
+}
 
 function openTutuExportDialog(text, characterName, options = {}) {
     let anchor = options.anchor || null;
@@ -9592,6 +9620,31 @@ function openTutuExportDialog(text, characterName, options = {}) {
         ? [{ value: 'html', icon: 'fa-code', label: 'HTML 文件', desc: '按原样导出，交互效果保留' }]
         : TUTU_EXPORT_FORMATS;
     const lastFormat = isHtml ? 'html' : saved.format;
+    // 选段：HTML 小剧场只能整份导出；页面上选中了文字时默认切到选段并勾上对应段落
+    const exportLines = isHtml ? [] : getTutuExportLines(text);
+    const selected = matchTutuSelectionLines(exportLines, tutuLastSelectionText);
+    const startPart = selected.size > 0 && selected.size < exportLines.length;
+    const rangeHtml = exportLines.length > 1 ? `
+            <div class="tutu-export-range">
+                <div class="tutu-export-range-switch" role="radiogroup" aria-label="导出范围">
+                    <button type="button" role="radio" class="tutu-export-range-btn" data-range="all" aria-checked="${startPart ? 'false' : 'true'}">全部</button>
+                    <button type="button" role="radio" class="tutu-export-range-btn" data-range="part" aria-checked="${startPart ? 'true' : 'false'}">选段</button>
+                </div>
+                <div class="tutu-export-range-panel"${startPart ? '' : ' hidden'}>
+                    <div class="tutu-export-range-tools">
+                        <span class="tutu-export-range-count"></span>
+                        <button type="button" class="tutu-export-range-tool" data-pick="all">全选</button>
+                        <button type="button" class="tutu-export-range-tool" data-pick="none">清空</button>
+                    </div>
+                    <div class="tutu-export-range-list">
+                        ${exportLines.map(({ index, line }) => `
+                        <label class="tutu-export-range-item">
+                            <input type="checkbox" data-line="${index}"${!startPart || selected.has(index) ? ' checked' : ''}>
+                            <span>${escapeHtml(line.trim())}</span>
+                        </label>`).join('')}
+                    </div>
+                </div>
+            </div>` : '';
 
     const modal = document.createElement('div');
     modal.id = 'tutu_export_dialog';
@@ -9602,6 +9655,7 @@ function openTutuExportDialog(text, characterName, options = {}) {
                 <i class="fa-solid fa-file-export" aria-hidden="true"></i>
                 导出为
             </div>
+            ${rangeHtml}
 
             <div class="tutu-export-formats">
                 ${formats.map(item => `
@@ -9716,7 +9770,39 @@ function updateTutuExportDialog() {
         ? `${masked ? '将屏蔽' : '可屏蔽'}：${items.map(item => item.name).slice(0, 4).join('、')}${items.length > 4 ? ` 等 ${items.length} 个` : ''}`
             + (images ? `（${images} 个换成图片）` : '')
         : '还没有名单，勾选时自动识别';
+
+    const count = modal.querySelector('.tutu-export-range-count');
+
+    if (count) {
+        const total = modal.querySelectorAll('.tutu-export-range-item input').length;
+        const picked = modal.querySelectorAll('.tutu-export-range-item input:checked').length;
+        count.textContent = `已选 ${picked} / ${total} 段`;
+    }
 }
+
+// 导出范围：全部 / 选段
+$(document).on('click', '#tutu_export_dialog .tutu-export-range-btn', function () {
+    const modal = document.getElementById('tutu_export_dialog');
+    const part = this.dataset.range === 'part';
+
+    if (!modal) return;
+
+    modal.querySelectorAll('.tutu-export-range-btn').forEach(button => {
+        button.setAttribute('aria-checked', String(button === this));
+    });
+    modal.querySelector('.tutu-export-range-panel').hidden = !part;
+    updateTutuExportDialog();
+    positionTutuPopover(modal, tutuExportDialogState?.anchor?.isConnected ? tutuExportDialogState.anchor : null);
+});
+
+$(document).on('click', '#tutu_export_dialog .tutu-export-range-tool', function () {
+    const checked = this.dataset.pick === 'all';
+
+    $('#tutu_export_dialog .tutu-export-range-item input').prop('checked', checked);
+    updateTutuExportDialog();
+});
+
+$(document).on('change', '#tutu_export_dialog .tutu-export-range-item input', updateTutuExportDialog);
 
 $(document).on('change', '#tutu_export_dialog .tutu-export-mask', function () {
     const state = tutuExportDialogState;
@@ -9767,6 +9853,13 @@ $(document).on('click', '#tutu_export_dialog .tutu-export-format', async functio
         return;
     }
 
+    const segment = getTutuExportSegment(modal, state.text);
+
+    if (!segment) {
+        toastr.warning('选段导出：请至少勾选一段');
+        return;
+    }
+
     if (!state.isHtml) {
         tutuSettings.exportOptions = { format, keepStyle, maskNames };
         persistTutuSettings();
@@ -9777,7 +9870,9 @@ $(document).on('click', '#tutu_export_dialog .tutu-export-format', async functio
     this.classList.add('busy');
 
     try {
-        await runTutuExport(state.text, state.characterName, { format, keepStyle, items });
+        await runTutuExport(segment.text, state.characterName, {
+            format, keepStyle, items, overrides: segment.overrides, partial: segment.partial,
+        });
         closeTutuExportDialog();
     } catch (error) {
         console.error('[克制放映室] 导出失败：', error);
@@ -9789,10 +9884,10 @@ $(document).on('click', '#tutu_export_dialog .tutu-export-format', async functio
 });
 
 /** 按导出面板的选择导出 */
-async function runTutuExport(text, characterName, { format, keepStyle, items }) {
+async function runTutuExport(text, characterName, { format, keepStyle, items, overrides = null, partial = false }) {
     const masked = maskTutuNameLabel(characterName, items);
-    // 角色名被屏蔽时，文件名用「已屏蔽」，不出现一串 ■
-    const name = masked === characterName ? characterName : '已屏蔽';
+    // 角色名被屏蔽时，文件名用「已屏蔽」，不出现一串 ■；选段导出时文件名带「选段」
+    const name = `${masked === characterName ? characterName : '已屏蔽'}${partial ? '-选段' : ''}`;
 
     if (format === 'html') {
         exportTutuMaskedHtmlFile(text, name, items);
@@ -9812,7 +9907,7 @@ async function runTutuExport(text, characterName, { format, keepStyle, items }) 
     }
 
     if (format === 'styled-html') {
-        const html = buildTutuStyledExportHtml(text, { keepStyle, items, forImage: false });
+        const html = buildTutuStyledExportHtml(text, { keepStyle, items, forImage: false, overrides });
         downloadTutuBlob(
             new Blob([html], { type: 'text/html;charset=utf-8' }),
             `${sanitizeTutuFilename(`克制放映室-${name}`)}.html`
@@ -9822,7 +9917,7 @@ async function runTutuExport(text, characterName, { format, keepStyle, items }) 
     }
 
     toastr.info('正在生成长图……');
-    await exportTutuStyledPng(text, name, { keepStyle, items });
+    await exportTutuStyledPng(text, name, { keepStyle, items, overrides });
 }
 
 /** HTML 小剧场导出：屏蔽时静态文字先换掉，脚本后来生成的文字由注入脚本换掉 */
@@ -9940,11 +10035,14 @@ ${buildTutuTypographyStructureCss(typo, '.tutu-export-page')}`.replace(/<\/style
  * 带排版的导出文档。
  * 名字在生成时直接从 DOM 里换掉，文件里不含原名字。
  */
-function buildTutuStyledExportHtml(text, { keepStyle, items, forImage, assets }) {
+function buildTutuStyledExportHtml(text, { keepStyle, items, forImage, assets, overrides = null }) {
     const typo = getTutuTypographyState();
     const width = typo.maxWidth > 0 ? Math.min(Math.max(typo.maxWidth, 360), 1200) : (forImage ? 720 : 760);
     const css = buildTutuExportCss(typo, { keepStyle, forImage, width, assets });
-    const body = keepStyle ? formatTutuPlainHtml(text, typo) : escapeHtml(normalizeTutuPlainSource(text));
+    // 选段导出时用挪过行号的修正，保证气泡识别和原文一致
+    const body = keepStyle
+        ? formatTutuPlainHtml(text, typo, overrides ? { overrides } : {})
+        : escapeHtml(normalizeTutuPlainSource(text));
 
     const doc = new DOMParser().parseFromString(
         `<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title></title><style id="tutu-export-css"></style></head>`
@@ -10070,9 +10168,9 @@ function loadTutuExportFrame(html) {
 }
 
 /** 带排版的长图：DOM → SVG foreignObject → canvas → PNG */
-async function exportTutuStyledPng(text, characterName, { keepStyle, items }) {
+async function exportTutuStyledPng(text, characterName, { keepStyle, items, overrides = null }) {
     const { assets, warnings } = await prepareTutuExportAssets(keepStyle);
-    const html = buildTutuStyledExportHtml(text, { keepStyle, items, forImage: true, assets });
+    const html = buildTutuStyledExportHtml(text, { keepStyle, items, forImage: true, assets, overrides });
     const frame = await loadTutuExportFrame(html);
 
     try {
