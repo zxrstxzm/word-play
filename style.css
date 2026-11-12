@@ -1959,6 +1959,25 @@
     }
 }
 
+/* ---- 收藏续写 ---- */
+.tutu-favorite-continue-btn.tutu-favorite-continuing {
+    color: #fff;
+    background: #d9534f;
+    border-color: #c9302c;
+    animation: tutu-generating-pulse 1.4s ease-out infinite;
+}
+
+.tutu-favorite-continue-btn:focus-visible {
+    outline: 2px solid var(--SmartThemeQuoteColor, #c96f4a);
+    outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .tutu-favorite-continue-btn.tutu-favorite-continuing {
+        animation: none;
+    }
+}
+
 /* ---- 屏蔽名字 ---- */
 .tutu-favorite-mask-btn.active {
     color: var(--SmartThemeQuoteColor, #c96f4a);

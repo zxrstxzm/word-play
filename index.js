@@ -483,6 +483,9 @@ const FAVORITES_EXPANDED_KEY =
 const TUTU_PACKAGE_TYPE = 'tutu-theater-package';
 const TUTU_PACKAGE_VERSION = 1;
 
+// 正在续写的收藏 id（同一时间只续写一条）
+let tutuFavoriteContinuingId = '';
+
 // 当前面板中正在显示的小剧场
 let tutuCurrentResultContent = '';
 let tutuCurrentResultCharacter = 'AI';
@@ -1204,6 +1207,11 @@ const isHtmlFavorite =
 const maskItems = getTutuActiveMaskItems(content);
 const isMasked = maskItems.length > 0;
 
+// 这条收藏正在续写时，续写按钮变成停止按钮
+const isContinuing =
+    tutuFavoriteContinuingId !== '' &&
+    String(item.id) === tutuFavoriteContinuingId;
+
 const preview =
     isHtmlFavorite
         ? ''
@@ -1279,6 +1287,19 @@ ${isHtmlFavorite ? '' : `
     aria-pressed="${isMasked ? 'true' : 'false'}"
     title="${isMasked ? '取消屏蔽名字' : '一键屏蔽名字（马赛克 / 图片替换）'}">
     <i class="fa-solid fa-user-secret"></i>
+</div>
+
+<div
+    class="
+        menu_button
+        margin0
+        tutu-favorite-continue-btn${isContinuing ? ' tutu-favorite-continuing' : ''}
+    "
+    role="button"
+    tabindex="0"
+    aria-label="${isContinuing ? '停止续写' : '续写这条收藏'}"
+    title="${isContinuing ? '正在续写，点击停止' : '续写：接着这条收藏的结尾继续往下写，写完自动保存回这条收藏'}">
+    <i class="fa-solid ${isContinuing ? 'fa-stop' : 'fa-forward'}"></i>
 </div>
 
 <div
@@ -11475,6 +11496,225 @@ function cancelTutuGeneration() {
 
     toastr.info('已取消生成', '克制放映室');
 }
+
+// ==========================================
+// 收藏续写：接着收藏的结尾继续写，结果保存回这条收藏
+// ==========================================
+
+/** 内容改变后，把屏蔽名字、气泡修正搬到新内容上（它们按内容指纹保存） */
+function moveTutuContentSettings(oldContent, newContent) {
+    try {
+        const mask = getTutuNameMask(oldContent);
+        if (mask) saveTutuNameMask(newContent, mask);
+
+        const lines = getTutuDialogueOverrides(oldContent);
+        if (Object.keys(lines).length) saveTutuDialogueOverrides(newContent, lines);
+
+        const scenarioId = getTutuContentScenarioId(oldContent);
+        if (scenarioId) rememberTutuContentScenario(newContent, scenarioId);
+    } catch (error) {
+        console.warn('[克制放映室] 迁移收藏设置失败：', error);
+    }
+}
+
+/** 收藏续写用的提示词：同一角色时带上完整设定，否则只带角色名和情境 */
+function buildTutuFavoriteContinuePrompt(favorite, previous) {
+    const format = isProbablyHtml(previous) ? 'html' : 'text';
+    const characterName = String(favorite.characterName || 'AI').trim() || 'AI';
+    const scenarioId = getTutuContentScenarioId(previous);
+    const scenarioItem = scenarioId
+        ? (tutuScenarios || []).find(item => item?.id === scenarioId)
+        : null;
+    const scenario = String(scenarioItem?.prompt || '').trim();
+
+    const isSameCharacter =
+        characterName === String(tutuCurrentCharacterContext?.characterName || '').trim();
+
+    const basePrompt = isSameCharacter
+        ? buildTutuContextPrompt(
+            scenario || `继续完成已收藏的小剧场「${favorite.title || '未命名小剧场'}」`,
+            format
+        )
+        : [
+            `请继续完成一段关于「${characterName}」的外置小剧场。`,
+            scenario ? `【用户提供的情境】\n${scenario}` : '',
+            '要求：这是独立于正文对话之外的番外内容，保持角色性格和说话方式，不要解释你的写作过程。',
+            buildTutuFormatRules(format),
+        ].filter(Boolean).join('\n\n');
+
+    return {
+        prompt: buildTutuContinuePrompt(basePrompt, previous),
+        scenarioId,
+    };
+}
+
+async function continueTutuFavorite(id) {
+    id = String(id || '');
+
+    if (tutuIsGenerating) {
+        toastr.info('正在生成中，请等这次生成结束或先停止');
+        return;
+    }
+
+    const favorite = loadTutuFavorites().find(item => String(item.id) === id);
+
+    if (!favorite) {
+        toastr.error('找不到这条收藏');
+        return;
+    }
+
+    const previous = String(favorite.content || '');
+
+    if (!previous.trim()) {
+        toastr.warning('这条收藏没有内容，无法续写');
+        return;
+    }
+
+    // HTML 已经写到 </html>，大概率是完整的，先确认
+    if (
+        isProbablyHtml(previous) &&
+        /<\/html\s*>\s*$/i.test(previous.trim()) &&
+        !confirm('这条 HTML 小剧场看起来已经写完了（有 </html> 结尾），仍要续写吗？')
+    ) {
+        return;
+    }
+
+    tutuIsGenerating = true;
+
+    const generationToken = {
+        cancelled: false,
+        controller:
+            typeof AbortController === 'function'
+                ? new AbortController()
+                : null,
+    };
+    tutuCurrentGeneration = generationToken;
+    tutuFavoriteContinuingId = id;
+
+    setTutuGenerateButtonState(true);
+    renderTutuFavorites();
+
+    toastr.info(`正在续写「${favorite.title || '未命名小剧场'}」……`, '克制放映室');
+
+    try {
+        await refreshTutuCharacterContext();
+
+        const { prompt, scenarioId } =
+            buildTutuFavoriteContinuePrompt(favorite, previous);
+
+        const provider = $('#tutu_api_provider').val() || 'main';
+        let result;
+
+        if (generationToken.cancelled) {
+            throw createTutuCancelError();
+        }
+
+        if (provider === 'secondary') {
+            result = await generateBySecondaryApi(
+                prompt,
+                generationToken.controller?.signal
+            );
+        } else {
+            result = await Promise.race([
+                generateRaw({
+                    prompt,
+                    quietToLoud: false,
+                    isImpersonate: false,
+                }),
+                waitTutuGenerationCancel(generationToken),
+            ]);
+        }
+
+        if (generationToken.cancelled) {
+            throw createTutuCancelError();
+        }
+
+        const continuation = String(result || '')
+            .replace(/^\s*```(?:html|HTML|xml|XML)?[ \t]*\r?\n?/, '')
+            .replace(/\r?\n?\s*```\s*$/, '');
+
+        if (!continuation.trim()) {
+            throw new Error('续写没有返回新内容');
+        }
+
+        const merged = mergeTutuContinuation(previous, continuation).trim();
+
+        // 续写期间这条收藏可能被删掉
+        const favorites = loadTutuFavorites();
+        const target = favorites.find(item => String(item.id) === id);
+
+        if (!target) {
+            toastr.warning('续写完成，但这条收藏已经被删除了，结果没有保存');
+            return;
+        }
+
+        target.content = merged;
+        target.type = isProbablyHtml(merged) ? 'html' : 'text';
+        target.updatedAt = Date.now();
+
+        saveTutuFavorites(favorites);
+        moveTutuContentSettings(previous, merged);
+
+        if (scenarioId) rememberTutuContentScenario(merged, scenarioId);
+
+        tutuFavoriteContinuingId = '';
+        renderTutuFavorites();
+        updateTutuFavoriteButtonState();
+
+        const htmlTruncated =
+            isProbablyHtml(merged) &&
+            /<!doctype html|<html[\s>]/i.test(merged) &&
+            !/<\/html\s*>\s*$/i.test(merged);
+
+        // 点提示可以撤销这次续写
+        const undo = () => {
+            const list = loadTutuFavorites();
+            const item = list.find(entry => String(entry.id) === id);
+
+            if (!item || item.content !== merged) {
+                toastr.warning('这条收藏已经变动过，无法撤销');
+                return;
+            }
+
+            item.content = previous;
+            item.type = isProbablyHtml(previous) ? 'html' : 'text';
+            saveTutuFavorites(list);
+            renderTutuFavorites();
+            updateTutuFavoriteButtonState();
+            toastr.success('已撤销这次续写');
+        };
+
+        toastr[htmlTruncated ? 'warning' : 'success'](
+            htmlTruncated
+                ? 'HTML 还没写完（缺少 </html>），可以再点一次续写。点这条提示可撤销本次续写'
+                : '已续写并保存到这条收藏，可再次续写。点这条提示可撤销本次续写',
+            '克制放映室',
+            { onclick: undo, timeOut: 10000, extendedTimeOut: 4000 }
+        );
+    } catch (error) {
+        if (generationToken.cancelled || isTutuCancelError(error)) {
+            return;
+        }
+
+        console.error('收藏续写失败：', error);
+
+        toastr.error(
+            getTutuErrorMessage(error) || '续写失败，请检查 API 配置',
+            '克制放映室续写失败'
+        );
+    } finally {
+        if (tutuCurrentGeneration === generationToken) {
+            tutuIsGenerating = false;
+            tutuCurrentGeneration = null;
+            setTutuGenerateButtonState(false);
+        }
+
+        if (tutuFavoriteContinuingId === id) {
+            tutuFavoriteContinuingId = '';
+            renderTutuFavorites();
+        }
+    }
+}
 function getTutuLatestMessageKey() {
     const context =
         SillyTavern.getContext();
@@ -15528,6 +15768,29 @@ $(document).on(
     '#tutu_clear_favorites_btn',
     function () {
         clearTutuFavorites();
+    }
+);
+
+// 收藏续写：续写中再点 = 停止
+$(document).on(
+    'click keydown',
+    '.tutu-favorite-continue-btn',
+    function (event) {
+        if (event.type === 'keydown' && event.key !== 'Enter' && event.key !== ' ') {
+            return;
+        }
+
+        event.preventDefault();
+        event.stopPropagation();
+
+        const id = String($(this).closest('.tutu-favorite-card').data('id'));
+
+        if (tutuFavoriteContinuingId && tutuFavoriteContinuingId === id) {
+            cancelTutuGeneration();
+            return;
+        }
+
+        continueTutuFavorite(id);
     }
 );
 
