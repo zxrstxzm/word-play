@@ -11530,6 +11530,10 @@ function buildTutuFavoriteContinuePrompt(favorite, previous) {
     const isSameCharacter =
         characterName === String(tutuCurrentCharacterContext?.characterName || '').trim();
 
+    // 附加提示词（破限 / 文风 / 附加要求），开启时才带上
+    const auxText = type =>
+        tutuSettings.auxPromptsEnabled ? joinTutuActiveAuxPromptText(type) : '';
+
     const basePrompt = isSameCharacter
         ? buildTutuContextPrompt(
             scenario || `继续完成已收藏的小剧场「${favorite.title || '未命名小剧场'}」`,
@@ -11538,6 +11542,9 @@ function buildTutuFavoriteContinuePrompt(favorite, previous) {
         : [
             `请继续完成一段关于「${characterName}」的外置小剧场。`,
             scenario ? `【用户提供的情境】\n${scenario}` : '',
+            auxText('jailbreak') ? `【破限提示词】\n${auxText('jailbreak')}` : '',
+            auxText('style') ? `【文风提示词】\n${auxText('style')}` : '',
+            auxText('extra') ? `【附加要求（必须遵守）】\n${auxText('extra')}` : '',
             '要求：这是独立于正文对话之外的番外内容，保持角色性格和说话方式，不要解释你的写作过程。',
             buildTutuFormatRules(format),
         ].filter(Boolean).join('\n\n');
@@ -12574,7 +12581,78 @@ function normalizeTutuMaxTokens(value) {
     return Math.min(number, 200000);
 }
 
+/** 副 API 返回空结果时自动重试的次数 */
+const TUTU_SECONDARY_EMPTY_RETRIES = 2;
+
+/**
+ * 副 API 生成：返回空结果（choices 为空、内容被拦截等）时自动重试。
+ * 中转 Gemini 等接口偶尔会返回 0 token 的空回复，重试通常就能成功。
+ */
 async function generateBySecondaryApi(prompt, signal) {
+    let lastError = null;
+
+    for (let attempt = 0; attempt <= TUTU_SECONDARY_EMPTY_RETRIES; attempt++) {
+        if (signal?.aborted) throw createTutuCancelError();
+
+        try {
+            return await requestTutuSecondaryApiOnce(prompt, signal);
+        } catch (error) {
+            if (!error?.tutuEmptyResponse || attempt >= TUTU_SECONDARY_EMPTY_RETRIES) {
+                throw error;
+            }
+
+            lastError = error;
+            console.warn(`[克制放映室] 副 API 返回空结果，第 ${attempt + 1} 次重试：`, error.tutuRawData);
+            toastr.info(`接口返回了空结果，正在自动重试（${attempt + 1}/${TUTU_SECONDARY_EMPTY_RETRIES}）……`, '克制放映室');
+
+            // 稍等一下再重试，期间可以被取消
+            await new Promise((resolve, reject) => {
+                const timer = setTimeout(resolve, 1200 * (attempt + 1));
+                signal?.addEventListener?.('abort', () => {
+                    clearTimeout(timer);
+                    reject(createTutuCancelError());
+                }, { once: true });
+            });
+        }
+    }
+
+    throw lastError;
+}
+
+/** 空结果的原因说明：被安全审核拦截 / 接口没生成任何内容 */
+function createTutuEmptyResponseError(data) {
+    const choice = data?.choices?.[0];
+    const finishReason = String(choice?.finish_reason || choice?.finishReason || '');
+    const blockReason = String(
+        data?.promptFeedback?.blockReason ||
+        data?.prompt_feedback?.block_reason ||
+        ''
+    );
+    const blocked =
+        Boolean(blockReason) ||
+        /content_filter|safety|prohibited|blocklist|recitation/i.test(finishReason);
+
+    const lines = [
+        blocked
+            ? '副 API 拒绝生成：内容被模型的安全审核拦截了。'
+            : '副 API 返回了空结果（没有生成任何文字），已自动重试仍然失败。',
+        '',
+        '可能的原因和解决办法：',
+        '1. 内容触发了模型审核（Gemini 较常见）：换一个模型，或在附加提示词里开启破限后再试；',
+        '2. 中转站 / 渠道临时出错或限流：稍等一会儿再点一次；',
+        '3. 上下文太长：减少读取的历史聊天条数或世界书条目。',
+    ];
+
+    const reason = blockReason || finishReason;
+    if (reason) lines.push('', `接口给出的原因：${reason}`);
+
+    const error = new Error(lines.join('\n'));
+    error.tutuEmptyResponse = true;
+    error.tutuRawData = data;
+    return error;
+}
+
+async function requestTutuSecondaryApiOnce(prompt, signal) {
     const endpointInput =
         $('#tutu_secondary_endpoint').val().trim();
 
@@ -12685,6 +12763,17 @@ if (!response.ok) {
                 : '输出被接口默认长度截断，可点「续写」或在设置里填写最大输出长度',
             '克制放映室'
         );
+    }
+
+    // choices 为空 / 0 token / 被审核拦截：标记为空结果，交给外层重试
+    if (
+        (Array.isArray(data?.choices) && !data.choices.length) ||
+        ((result === undefined || result === null || result === '') &&
+            (Number(data?.usage?.completion_tokens) === 0 ||
+                /content_filter|safety|prohibited/i.test(String(data?.choices?.[0]?.finish_reason || '')) ||
+                data?.promptFeedback?.blockReason))
+    ) {
+        throw createTutuEmptyResponseError(data);
     }
 
     if (result === undefined || result === null) {
