@@ -1506,6 +1506,7 @@ tutuSettings = {
     endpoint: '',
     apiKey: '',
     model: '',
+    activeApiPresetName: '',
     activeJailbreakPromptId: '',
     activeStylePromptId: '',
     activeAuxPromptIds: null,   // { jailbreak: [], style: [], extra: [] }，null 时从旧字段迁移
@@ -13091,6 +13092,43 @@ function loadTutuAuxPromptIntoEditor(type, id) {
     updateTutuAuxPromptEditorStatus();
 }
 
+/** 按实际连接配置找回预设，兼容没有记录预设名称的旧设置。 */
+function getCurrentTutuApiPresetIndex() {
+    const matches = preset =>
+        String(preset.endpoint || '').trim() === String(tutuSettings.endpoint || '').trim() &&
+        String(preset.apiKey || '').trim() === String(tutuSettings.apiKey || '').trim() &&
+        String(preset.model || '').trim() === String(tutuSettings.model || '').trim() &&
+        (!Object.prototype.hasOwnProperty.call(preset, 'maxTokens') ||
+            normalizeTutuMaxTokens(preset.maxTokens) === normalizeTutuMaxTokens(tutuSettings.secondaryMaxTokens));
+
+    const namedIndex = tutuApiPresets.findIndex(preset =>
+        preset.name === tutuSettings.activeApiPresetName && matches(preset)
+    );
+
+    return namedIndex >= 0 ? namedIndex : tutuApiPresets.findIndex(matches);
+}
+
+/** 输入和载入预设都走同一保存流程，程序填值也会立即生效。 */
+function saveTutuApiSettingsFromUI(changedField = '') {
+    tutuSettings.provider = $('#tutu_api_provider').val() || 'main';
+    tutuSettings.endpoint = String($('#tutu_secondary_endpoint').val() || '').trim();
+    tutuSettings.apiKey = String($('#tutu_secondary_api_key').val() || '').trim();
+
+    const model = String($('#tutu_secondary_model').val() || '').trim();
+
+    // 拉取模型时选项会暂时清空，不覆盖已保存的模型。
+    if (model || changedField === 'tutu_secondary_model') {
+        tutuSettings.model = model;
+    }
+
+    tutuSettings.secondaryMaxTokens = normalizeTutuMaxTokens($('#tutu_secondary_max_tokens').val());
+
+    const index = getCurrentTutuApiPresetIndex();
+    tutuSettings.activeApiPresetName = index >= 0 ? tutuApiPresets[index].name : '';
+    persistTutuSettings();
+    $('#tutu_api_preset_select').val(index >= 0 ? String(index) : '');
+}
+
 function renderApiPresetDropdown() {
     const $select = $('#tutu_api_preset_select');
 
@@ -13113,6 +13151,10 @@ function renderApiPresetDropdown() {
             })
         );
     });
+
+    const index = getCurrentTutuApiPresetIndex();
+    $select.val(index >= 0 ? String(index) : '');
+    $('#tutu_api_preset_name').val(index >= 0 ? tutuApiPresets[index].name : '');
 }
 const TUTU_UI_THEMES = new Set([
     'classic',
@@ -13427,13 +13469,16 @@ if (!model) {
         JSON.stringify(tutuApiPresets)
     );
 
+    tutuSettings.activeApiPresetName = name;
+    saveTutuApiSettingsFromUI();
     renderApiPresetDropdown();
 
     toastr.success(`副 API 预设「${name}」已保存`);
 }
 
 function loadSelectedApiPreset() {
-    const index = Number($('#tutu_api_preset_select').val());
+    const selected = String($('#tutu_api_preset_select').val() || '');
+    const index = selected === '' ? -1 : Number(selected);
 
     if (!Number.isInteger(index) || !tutuApiPresets[index]) {
         toastr.warning('请选择一个副 API 预设');
@@ -13442,45 +13487,30 @@ function loadSelectedApiPreset() {
 
     const preset = tutuApiPresets[index];
 
+    $('#tutu_api_provider').val('secondary');
     $('#tutu_secondary_endpoint').val(preset.endpoint || '');
     $('#tutu_secondary_api_key').val(preset.apiKey || '');
     const presetModel = String(preset.model || '');
-
-const $modelSelect =
-    $('#tutu_secondary_model');
-
-if (
-    presetModel &&
-    !$modelSelect.find(
-        `option[value="${CSS.escape(presetModel)}"]`
-    ).length
-) {
-    $modelSelect.append(
-        $('<option>', {
-            value: presetModel,
-            text: `${presetModel}（预设）`
-        })
-    );
-}
-
-$modelSelect.val(presetModel);
+    setTutuSecondaryModelValue(presetModel);
 
     // 旧预设没有这个字段时保留当前值
     if (Object.prototype.hasOwnProperty.call(preset, 'maxTokens')) {
         const presetMaxTokens = normalizeTutuMaxTokens(preset.maxTokens);
 
         $('#tutu_secondary_max_tokens').val(presetMaxTokens || '');
-        tutuSettings.secondaryMaxTokens = presetMaxTokens;
-        persistTutuSettings();
     }
 
-    $('#tutu_api_preset_name').val(preset.name || '');
+    tutuSettings.activeApiPresetName = preset.name;
+    saveTutuApiSettingsFromUI('tutu_secondary_model');
+    updateSecondaryApiVisibility();
+    renderApiPresetDropdown();
 
     toastr.success(`已载入副 API 预设：${preset.name}`);
 }
 
 function deleteSelectedApiPreset() {
-    const index = Number($('#tutu_api_preset_select').val());
+    const selected = String($('#tutu_api_preset_select').val() || '');
+    const index = selected === '' ? -1 : Number(selected);
 
     if (!Number.isInteger(index) || !tutuApiPresets[index]) {
         toastr.warning('请选择一个副 API 预设');
@@ -13494,6 +13524,11 @@ function deleteSelectedApiPreset() {
     }
 
     tutuApiPresets.splice(index, 1);
+
+    if (tutuSettings.activeApiPresetName === preset.name) {
+        tutuSettings.activeApiPresetName = '';
+        persistTutuSettings();
+    }
 
     localStorage.setItem(
         API_PRESETS_KEY,
@@ -17158,8 +17193,7 @@ $(document).on('change', '#tutu_api_provider', function() {
 
 // 最大输出长度：改动即保存，快捷按钮直接填入
 $(document).on('input change', '#tutu_secondary_max_tokens', function () {
-    tutuSettings.secondaryMaxTokens = normalizeTutuMaxTokens($(this).val());
-    persistTutuSettings();
+    saveTutuApiSettingsFromUI();
 });
 
 $(document).on('click', '.tutu-max-tokens-preset', function () {
@@ -17173,21 +17207,7 @@ $(document).on(
     'input change',
     '#tutu_api_provider, #tutu_secondary_endpoint, #tutu_secondary_api_key, #tutu_secondary_model',
     function () {
-        tutuSettings.provider =
-            $('#tutu_api_provider').val() || 'main';
-        tutuSettings.endpoint =
-            String($('#tutu_secondary_endpoint').val() || '').trim();
-        tutuSettings.apiKey =
-            String($('#tutu_secondary_api_key').val() || '').trim();
-
-        const model = String($('#tutu_secondary_model').val() || '').trim();
-
-        // 拉取模型过程中下拉框会暂时为空，此时不覆盖已保存的模型
-        if (model || this.id === 'tutu_secondary_model') {
-            tutuSettings.model = model;
-        }
-
-        persistTutuSettings();
+        saveTutuApiSettingsFromUI(this.id);
     }
 );
 $(document).on(
